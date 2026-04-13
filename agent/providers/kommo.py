@@ -17,12 +17,54 @@ Flujo:
 """
 
 import os
+import re
 import logging
 import httpx
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 
 logger = logging.getLogger("agentkit")
+
+
+def _set_value(obj, keys, value):
+    """Inserta value en la estructura anidada siguiendo la lista de keys."""
+    if not keys:
+        return
+    key = keys[0]
+    remaining = keys[1:]
+    if not remaining:
+        if isinstance(obj, list):
+            idx = int(key)
+            while len(obj) <= idx:
+                obj.append(None)
+            obj[idx] = value
+        else:
+            obj[key] = value
+        return
+    next_key = remaining[0]
+    next_is_index = next_key.isdigit()
+    if isinstance(obj, list):
+        idx = int(key)
+        while len(obj) <= idx:
+            obj.append([] if next_is_index else {})
+        _set_value(obj[idx], remaining, value)
+    else:
+        if key not in obj:
+            obj[key] = [] if next_is_index else {}
+        _set_value(obj[key], remaining, value)
+
+
+def _parse_kommo_form(flat: dict) -> dict:
+    """Convierte datos form-encoded con bracket notation a dict anidado.
+
+    Ejemplo: {"message[add][0][text]": "Hola"} → {"message": {"add": [{"text": "Hola"}]}}
+    """
+    result = {}
+    for raw_key, value in flat.items():
+        parts = re.split(r'\[|\]', raw_key)
+        parts = [p for p in parts if p != '']
+        _set_value(result, parts, value)
+    return result
 
 
 class ProveedorKommo(ProveedorWhatsApp):
@@ -49,26 +91,31 @@ class ProveedorKommo(ProveedorWhatsApp):
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """
         Parsea el payload de Kommo cuando llega un mensaje nuevo.
-
-        Kommo envía los mensajes entrantes con esta estructura:
-        {
-          "message": {
-            "add": [{
-              "id": "...",
-              "talk_id": 123,
-              "chat_id": "...",
-              "contact": {"id": 456, "name": "Juan"},
-              "text": "Hola, quiero info de uniformes",
-              "author": {"id": "...", "type": "contact"},
-              "created_at": 1234567890
-            }]
-          }
-        }
+        Kommo puede enviar el payload como JSON o como form-encoded con bracket notation.
         """
+        body = {}
+
+        content_type = request.headers.get("content-type", "")
+        logger.info(f"Kommo webhook recibido — content-type: {content_type}")
+
+        # Intentar JSON primero
         try:
             body = await request.json()
+            logger.info(f"Kommo payload JSON: {body}")
         except Exception:
-            return []
+            pass
+
+        # Si no es JSON, parsear form-encoded
+        if not body:
+            try:
+                form = await request.form()
+                flat = dict(form)
+                logger.info(f"Kommo payload form-encoded: {flat}")
+                body = _parse_kommo_form(flat)
+                logger.info(f"Kommo payload parseado: {body}")
+            except Exception as e:
+                logger.error(f"Error parseando webhook de Kommo: {e}")
+                return []
 
         mensajes = []
         for msg in body.get("message", {}).get("add", []):
