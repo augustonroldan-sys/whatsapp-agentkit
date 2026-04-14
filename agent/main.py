@@ -171,6 +171,20 @@ async def api_actualizar_etapa(telefono: str, etapa: str, x_password: str = None
     return {"status": "ok"}
 
 
+@app.post("/api/conversaciones/{telefono}/enviar")
+async def api_enviar_mensaje(telefono: str, x_password: str = None, request: Request = None):
+    """CRM — Fedra envía un mensaje manual a un cliente."""
+    verificar_password(x_password)
+    body = await request.json()
+    texto = body.get("mensaje", "").strip()
+    if not texto:
+        raise HTTPException(status_code=400, detail="Mensaje vacío")
+    await proveedor.enviar_mensaje(telefono, texto)
+    await guardar_mensaje(telefono, "assistant", texto)
+    logger.info(f"Mensaje manual enviado a {telefono}: {texto}")
+    return {"status": "ok"}
+
+
 @app.post("/reactivar/{telefono}")
 async def reactivar_sofia(telefono: str):
     """
