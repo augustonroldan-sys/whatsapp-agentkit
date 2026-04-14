@@ -25,6 +25,7 @@ class ProveedorMeta(ProveedorWhatsApp):
         mode = params.get("hub.mode")
         token = params.get("hub.verify_token")
         challenge = params.get("hub.challenge")
+        logger.info(f"Webhook verify — mode={mode}, match={token == self.verify_token}, token_len={len(token or '')}, esperado_len={len(self.verify_token or '')}")
         if mode == "subscribe" and token == self.verify_token:
             # Meta espera el challenge como respuesta en texto plano
             return int(challenge)
