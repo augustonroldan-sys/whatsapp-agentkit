@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from agent.brain import generar_respuesta
 from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado
 from agent.providers import obtener_proveedor
-from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion
+from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
 
 load_dotenv()
 
@@ -92,6 +92,7 @@ async def webhook_handler(request: Request):
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 await marcar_derivado(msg.telefono)
+                await enviar_alerta_telegram(msg.telefono, msg.texto)
 
                 # Enviar respuesta al cliente
                 talk_id = msg.__dict__.get("_talk_id")

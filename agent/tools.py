@@ -9,8 +9,35 @@ Casos de uso: consultas de productos, presupuestos, derivación a humano.
 import os
 import yaml
 import logging
+import httpx
 
 logger = logging.getLogger("agentkit")
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+async def enviar_alerta_telegram(contacto: str, mensaje: str) -> None:
+    """Envía una alerta a Telegram cuando Sofia detecta un cliente interesado."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID no configurados")
+        return
+    texto = (
+        f"🔥 *Cliente interesado en HeFe Uniformes*\n\n"
+        f"📱 Contacto: `{contacto}`\n"
+        f"💬 Mensaje: {mensaje}\n\n"
+        f"👉 Sofia ya le avisó que Fedra o Agustina lo contactan."
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": texto,
+                "parse_mode": "Markdown"
+            })
+    except Exception as e:
+        logger.error(f"Error enviando alerta Telegram: {e}")
 
 
 def cargar_info_negocio() -> dict:
