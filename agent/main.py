@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado
+from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado, listar_conversaciones, actualizar_etapa
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
 
@@ -130,6 +130,37 @@ async def webhook_handler(request: Request):
     except Exception as e:
         logger.error(f"Error en webhook: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+CRM_PASSWORD = os.getenv("CRM_PASSWORD", "hefe2026")
+
+
+def verificar_password(x_password: str = None):
+    if x_password != CRM_PASSWORD:
+        raise HTTPException(status_code=401, detail="No autorizado")
+
+
+@app.get("/api/conversaciones")
+async def api_conversaciones(x_password: str = None):
+    """CRM — lista todas las conversaciones."""
+    verificar_password(x_password)
+    return await listar_conversaciones()
+
+
+@app.get("/api/conversaciones/{telefono}")
+async def api_historial(telefono: str, x_password: str = None):
+    """CRM — historial completo de una conversación."""
+    verificar_password(x_password)
+    historial = await obtener_historial(telefono, limite=50)
+    return {"telefono": telefono, "mensajes": historial}
+
+
+@app.put("/api/conversaciones/{telefono}/etapa")
+async def api_actualizar_etapa(telefono: str, etapa: str, x_password: str = None):
+    """CRM — actualiza la etapa del pipeline."""
+    verificar_password(x_password)
+    await actualizar_etapa(telefono, etapa)
+    return {"status": "ok"}
 
 
 @app.post("/reactivar/{telefono}")

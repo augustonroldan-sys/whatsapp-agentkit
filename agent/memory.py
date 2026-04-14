@@ -50,7 +50,9 @@ class Conversacion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     telefono: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(200), default="")
     derivada: Mapped[bool] = mapped_column(Boolean, default=False)
+    etapa: Mapped[str] = mapped_column(String(50), default="nuevo")
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -137,6 +139,47 @@ async def marcar_derivado(telefono: str):
         else:
             session.add(Conversacion(telefono=telefono, derivada=True))
         await session.commit()
+
+
+async def actualizar_etapa(telefono: str, etapa: str):
+    """Actualiza la etapa del pipeline de una conversación."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Conversacion).where(Conversacion.telefono == telefono)
+        )
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.etapa = etapa
+            conv.actualizado = datetime.utcnow()
+            await session.commit()
+
+
+async def listar_conversaciones() -> list[dict]:
+    """Retorna todas las conversaciones con su último mensaje."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Conversacion).order_by(Conversacion.actualizado.desc())
+        )
+        convs = result.scalars().all()
+        output = []
+        for conv in convs:
+            ultimo = await session.execute(
+                select(Mensaje)
+                .where(Mensaje.telefono == conv.telefono)
+                .order_by(Mensaje.timestamp.desc())
+                .limit(1)
+            )
+            msg = ultimo.scalar_one_or_none()
+            output.append({
+                "telefono": conv.telefono,
+                "nombre": conv.nombre or conv.telefono,
+                "etapa": conv.etapa,
+                "derivada": conv.derivada,
+                "actualizado": conv.actualizado.isoformat(),
+                "ultimo_mensaje": msg.content[:100] if msg else "",
+                "ultimo_rol": msg.role if msg else "",
+            })
+        return output
 
 
 async def reactivar_conversacion(telefono: str):
