@@ -89,18 +89,19 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
     """
     Genera una respuesta usando Claude API (Sofia).
     Usa Haiku para consultas simples y Sonnet para las complejas.
-
-    Args:
-        mensaje: El mensaje nuevo del cliente
-        historial: Lista de mensajes anteriores [{"role": "user/assistant", "content": "..."}]
-
-    Returns:
-        La respuesta generada por Sofia
+    Lee el system prompt desde la DB si está configurado, sino desde YAML.
     """
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback()
 
-    system_prompt = cargar_system_prompt()
+    # Intentar leer system prompt desde DB (configurable desde el CRM)
+    try:
+        from agent.memory import obtener_config
+        db_prompt = await obtener_config("system_prompt", "")
+        system_prompt = db_prompt if db_prompt else cargar_system_prompt()
+    except Exception:
+        system_prompt = cargar_system_prompt()
+
     modelo = elegir_modelo(mensaje, historial)
 
     # Construir mensajes para la API incluyendo el historial

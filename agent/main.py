@@ -470,8 +470,11 @@ async def resetear_conversacion(telefono: str, x_password: str = None):
 async def api_get_configuracion(x_password: str = None):
     """CRM — obtiene la configuración actual."""
     verificar_password(x_password)
+    from agent.brain import cargar_system_prompt
+    yaml_prompt = cargar_system_prompt()
     return {
         "delay_respuesta": await obtener_config("delay_respuesta", "normal"),
+        "system_prompt": await obtener_config("system_prompt", yaml_prompt),
     }
 
 
@@ -487,11 +490,17 @@ async def api_set_configuracion(x_password: str = None, request: Request = None)
 
 @app.post("/reactivar/{telefono}")
 async def reactivar_sofia(telefono: str):
-    """
-    Endpoint para reactivar a Sofia en una conversación que fue derivada.
-    Llamar desde Kommo o manualmente cuando el humano termina de atender.
-    """
+    """Reactiva a Sofia en una conversación que fue derivada."""
     from agent.memory import reactivar_conversacion
     await reactivar_conversacion(telefono)
     logger.info(f"Sofia reactivada para {telefono}")
     return {"status": "ok", "mensaje": f"Sofia reactivada para {telefono}"}
+
+
+@app.post("/pausar/{telefono}")
+async def pausar_sofia(telefono: str, x_password: str = None):
+    """Pausa a Sofia en una conversación — Fedra toma el control."""
+    verificar_password(x_password)
+    await marcar_derivado(telefono)
+    logger.info(f"Sofia pausada para {telefono}")
+    return {"status": "ok", "mensaje": f"Sofia pausada para {telefono}"}
