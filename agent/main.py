@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado, listar_conversaciones, actualizar_etapa
+from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado, listar_conversaciones, actualizar_etapa, limpiar_historial, async_session, Conversacion
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
 
@@ -183,6 +183,22 @@ async def api_enviar_mensaje(telefono: str, x_password: str = None, request: Req
     await guardar_mensaje(telefono, "assistant", texto)
     logger.info(f"Mensaje manual enviado a {telefono}: {texto}")
     return {"status": "ok"}
+
+
+@app.post("/resetear/{telefono}")
+async def resetear_conversacion(telefono: str, x_password: str = None):
+    """
+    Borra todo el historial y estado de una conversación.
+    El número queda como nuevo para Sofia.
+    """
+    verificar_password(x_password)
+    from sqlalchemy import delete as sql_delete
+    await limpiar_historial(telefono)
+    async with async_session() as session:
+        await session.execute(sql_delete(Conversacion).where(Conversacion.telefono == telefono))
+        await session.commit()
+    logger.info(f"Conversación {telefono} reseteada completamente")
+    return {"status": "ok", "mensaje": f"Conversación {telefono} reseteada"}
 
 
 @app.post("/reactivar/{telefono}")
