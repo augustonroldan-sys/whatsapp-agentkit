@@ -61,6 +61,15 @@ class Conversacion(Base):
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Configuracion(Base):
+    """Configuración del sistema — pares clave/valor."""
+    __tablename__ = "configuracion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clave: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    valor: Mapped[str] = mapped_column(String(500), default="")
+
+
 async def inicializar_db():
     """Crea las tablas si no existen y agrega columnas nuevas."""
     async with engine.begin() as conn:
@@ -74,6 +83,26 @@ async def inicializar_db():
             )
         except Exception:
             pass  # SQLite no soporta IF NOT EXISTS — ignorar
+
+
+async def obtener_config(clave: str, default: str = "") -> str:
+    """Lee un valor de configuración."""
+    async with async_session() as session:
+        result = await session.execute(select(Configuracion).where(Configuracion.clave == clave))
+        cfg = result.scalar_one_or_none()
+        return cfg.valor if cfg else default
+
+
+async def guardar_config(clave: str, valor: str):
+    """Guarda o actualiza un valor de configuración."""
+    async with async_session() as session:
+        result = await session.execute(select(Configuracion).where(Configuracion.clave == clave))
+        cfg = result.scalar_one_or_none()
+        if cfg:
+            cfg.valor = valor
+        else:
+            session.add(Configuracion(clave=clave, valor=valor))
+        await session.commit()
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str, message_id: str = ""):

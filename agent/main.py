@@ -19,7 +19,8 @@ from agent.memory import (
     inicializar_db, guardar_mensaje, obtener_historial, esta_derivado,
     marcar_derivado, listar_conversaciones, actualizar_etapa,
     limpiar_historial, async_session, Conversacion,
-    actualizar_nombre, upsert_conversacion
+    actualizar_nombre, upsert_conversacion,
+    obtener_config, guardar_config,
 )
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
@@ -210,12 +211,25 @@ async def webhook_handler(request: Request):
                 logger.info(f"Conversación {telefono} derivada a humano")
                 continue
 
-            # Sofia responde
+            # Sofia responde con delay configurable
             respuesta = await generar_respuesta(texto, historial)
             await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
+
+            # Delay para parecer más humano
+            import asyncio, random
+            delay_modo = await obtener_config("delay_respuesta", "normal")
+            rangos = {
+                "inmediata": (0, 1),
+                "rapida":    (2, 4),
+                "normal":    (5, 8),
+                "lenta":     (10, 15),
+            }
+            lo, hi = rangos.get(delay_modo, (5, 8))
+            await asyncio.sleep(random.uniform(lo, hi))
+
             resp_id = await enviar_texto_whapi(telefono, respuesta)
             await guardar_mensaje(telefono, "assistant", respuesta, message_id=resp_id)
-            logger.info(f"Sofia respondió a {nombre_contacto or telefono}: {respuesta}")
+            logger.info(f"Sofia respondió a {nombre_contacto or telefono} (delay:{delay_modo}): {respuesta}")
 
         return {"status": "ok"}
 
@@ -450,6 +464,25 @@ async def resetear_conversacion(telefono: str, x_password: str = None):
         await session.commit()
     logger.info(f"Conversación {telefono} reseteada completamente")
     return {"status": "ok", "mensaje": f"Conversación {telefono} reseteada"}
+
+
+@app.get("/api/configuracion")
+async def api_get_configuracion(x_password: str = None):
+    """CRM — obtiene la configuración actual."""
+    verificar_password(x_password)
+    return {
+        "delay_respuesta": await obtener_config("delay_respuesta", "normal"),
+    }
+
+
+@app.put("/api/configuracion")
+async def api_set_configuracion(x_password: str = None, request: Request = None):
+    """CRM — actualiza la configuración."""
+    verificar_password(x_password)
+    body = await request.json()
+    for clave, valor in body.items():
+        await guardar_config(clave, str(valor))
+    return {"status": "ok"}
 
 
 @app.post("/reactivar/{telefono}")
