@@ -10,7 +10,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -111,38 +111,47 @@ async def webhook_handler(request: Request):
 
             # Extraer texto según tipo de mensaje
             texto = None
+            imagen_bytes: bytes | None = None
+            imagen_mime: str = "image/jpeg"
             if tipo == "text":
                 texto = msg_raw.get("text", {}).get("body", "")
             elif tipo == "audio":
-                # Transcribir audio
                 audio_info = msg_raw.get("audio", {})
                 media_id = audio_info.get("id", "")
                 mime_type = audio_info.get("mime_type", "audio/ogg")
+                # Guardar en CRM con media_id para reproducción
                 if media_id:
+                    await guardar_mensaje(telefono, "user", f"[Audio]({media_id})", message_id=msg_id_entrante)
+                    # Intentar transcribir para que Sofia entienda
                     audio_bytes = await descargar_audio(media_id)
                     if audio_bytes:
-                        texto = await transcribir_audio(audio_bytes, mime_type)
-                        if texto:
-                            logger.info(f"Audio transcripto de {telefono}: {texto}")
+                        transcripcion = await transcribir_audio(audio_bytes, mime_type)
+                        if transcripcion:
+                            logger.info(f"Audio transcripto de {telefono}: {transcripcion}")
+                            texto = transcripcion
                         else:
-                            texto = "[Audio recibido — no se pudo transcribir]"
+                            texto = None  # Sin transcripción — Sofia no responde al audio
                     else:
-                        texto = "[Audio recibido — no se pudo descargar]"
-                if not texto or texto.startswith("[Audio"):
-                    await proveedor.enviar_mensaje(
-                        telefono,
-                        "Recibí tu audio 🎙️ Por ahora no puedo escucharlo. ¿Podés escribirme lo que necesitás?"
-                    )
-                    continue
+                        texto = None
+                else:
+                    texto = None
+                if not texto:
+                    continue  # Sin transcripción — no responder
             elif tipo == "image":
                 img_info = msg_raw.get("image", {})
                 caption = img_info.get("caption", "")
-                img_url = img_info.get("url", "") or (f"https://gate.whapi.cloud/media/{img_info.get('id')}" if img_info.get("id") else "")
+                media_id = img_info.get("id", "")
+                img_url = img_info.get("url", "") or (f"https://gate.whapi.cloud/media/{media_id}" if media_id else "")
                 texto_crm = f"[Imagen]({img_url})" if img_url else "[Imagen]"
                 if caption:
                     texto_crm += f" {caption}"
                 await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
-                texto = caption if caption else f"El cliente envió una imagen"
+                # Descargar imagen para que Sofia la entienda con Claude Vision
+                imagen_bytes = None
+                imagen_mime = img_info.get("mime_type", "image/jpeg")
+                if media_id:
+                    imagen_bytes = await descargar_media(media_id)
+                texto = caption if caption else "El cliente envió una imagen"
             elif tipo == "video":
                 vid_info = msg_raw.get("video", {})
                 caption = vid_info.get("caption", "")
@@ -212,7 +221,7 @@ async def webhook_handler(request: Request):
                 continue
 
             # Sofia responde con delay configurable
-            respuesta = await generar_respuesta(texto, historial)
+            respuesta = await generar_respuesta(texto, historial, imagen_bytes=imagen_bytes, imagen_mime=imagen_mime)
             await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
 
             # Delay para parecer más humano
@@ -396,7 +405,8 @@ async def _tarea_sincronizar():
                     vid_url = vid_data.get("url", "") or (f"https://gate.whapi.cloud/media/{vid_data.get('id')}" if vid_data.get("id") else "")
                     texto = (f"[Video]({vid_url})" if vid_url else "[Video]") + (f" {caption}" if caption else "")
                 elif tipo == "audio":
-                    texto = "[Audio 🎙️]"
+                    audio_id = msg.get("audio", {}).get("id", "")
+                    texto = f"[Audio]({audio_id})" if audio_id else "[Audio 🎙️]"
                 elif tipo == "document":
                     nombre_doc = msg.get("document", {}).get("file_name", "archivo")
                     texto = f"[Documento: {nombre_doc}]"
@@ -486,6 +496,25 @@ async def api_set_configuracion(x_password: str = None, request: Request = None)
     for clave, valor in body.items():
         await guardar_config(clave, str(valor))
     return {"status": "ok"}
+
+
+@app.get("/api/media/{media_id}")
+async def api_media_proxy(media_id: str, x_password: str = None):
+    """Proxy para servir audio/media de Whapi al CRM sin exponer el token."""
+    verificar_password(x_password)
+    import httpx
+    WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "")
+    url = f"https://gate.whapi.cloud/media/{media_id}"
+    async with httpx.AsyncClient(timeout=30) as http:
+        resp = await http.get(url, headers={"Authorization": f"Bearer {WHAPI_TOKEN}"})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="Media no encontrado")
+        content_type = resp.headers.get("content-type", "application/octet-stream")
+        return StreamingResponse(
+            iter([resp.content]),
+            media_type=content_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
 
 @app.post("/reactivar/{telefono}")

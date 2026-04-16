@@ -11,6 +11,7 @@ Routing de modelos:
 """
 
 import os
+import base64
 import yaml
 import logging
 from anthropic import AsyncAnthropic
@@ -85,10 +86,16 @@ def obtener_mensaje_fallback() -> str:
     return config.get("fallback_message", "Disculpá, no entendí bien tu consulta. ¿Podés reformularla?")
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
+async def generar_respuesta(
+    mensaje: str,
+    historial: list[dict],
+    imagen_bytes: bytes | None = None,
+    imagen_mime: str = "image/jpeg",
+) -> str:
     """
     Genera una respuesta usando Claude API (Sofia).
     Usa Haiku para consultas simples y Sonnet para las complejas.
+    Si se recibe una imagen (imagen_bytes), usa Claude Vision con Sonnet.
     Lee el system prompt desde la DB si está configurado, sino desde YAML.
     """
     if not mensaje or len(mensaje.strip()) < 2:
@@ -102,11 +109,31 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
     except Exception:
         system_prompt = cargar_system_prompt()
 
-    modelo = elegir_modelo(mensaje, historial)
+    # Visión requiere Sonnet; de lo contrario elegir según complejidad
+    modelo = MODELO_POTENTE if imagen_bytes else elegir_modelo(mensaje, historial)
 
-    # Construir mensajes para la API incluyendo el historial
+    # Construir mensajes del historial (solo texto, sin imágenes previas)
     mensajes = [{"role": msg["role"], "content": msg["content"]} for msg in historial]
-    mensajes.append({"role": "user", "content": mensaje})
+
+    # Mensaje actual: multimodal si hay imagen, texto si no
+    if imagen_bytes:
+        imagen_b64 = base64.standard_b64encode(imagen_bytes).decode("utf-8")
+        mensajes.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": imagen_mime,
+                        "data": imagen_b64,
+                    },
+                },
+                {"type": "text", "text": mensaje},
+            ],
+        })
+    else:
+        mensajes.append({"role": "user", "content": mensaje})
 
     try:
         response = await client.messages.create(
