@@ -134,11 +134,23 @@ async def webhook_handler(request: Request):
                     )
                     continue
             elif tipo == "image":
-                caption = msg_raw.get("image", {}).get("caption", "")
-                texto = caption if caption else None
+                img_info = msg_raw.get("image", {})
+                caption = img_info.get("caption", "")
+                img_url = img_info.get("url", "") or (f"https://gate.whapi.cloud/media/{img_info.get('id')}" if img_info.get("id") else "")
+                texto_crm = f"[Imagen]({img_url})" if img_url else "[Imagen]"
+                if caption:
+                    texto_crm += f" {caption}"
+                await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
+                texto = caption if caption else f"El cliente envió una imagen"
             elif tipo == "video":
-                caption = msg_raw.get("video", {}).get("caption", "")
-                texto = caption if caption else None
+                vid_info = msg_raw.get("video", {})
+                caption = vid_info.get("caption", "")
+                vid_url = vid_info.get("url", "") or (f"https://gate.whapi.cloud/media/{vid_info.get('id')}" if vid_info.get("id") else "")
+                texto_crm = f"[Video]({vid_url})" if vid_url else "[Video]"
+                if caption:
+                    texto_crm += f" {caption}"
+                await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
+                texto = caption if caption else f"El cliente envió un video"
             elif tipo == "document":
                 doc_info = msg_raw.get("document", {})
                 media_id = doc_info.get("id", "")
@@ -360,11 +372,15 @@ async def _tarea_sincronizar():
                 if tipo == "text":
                     texto = msg.get("text", {}).get("body", "")
                 elif tipo == "image":
-                    caption = msg.get("image", {}).get("caption", "")
-                    texto = f"[Imagen]{': ' + caption if caption else ''}"
+                    img_data = msg.get("image", {})
+                    caption = img_data.get("caption", "")
+                    img_url = img_data.get("url", "") or (f"https://gate.whapi.cloud/media/{img_data.get('id')}" if img_data.get("id") else "")
+                    texto = (f"[Imagen]({img_url})" if img_url else "[Imagen]") + (f" {caption}" if caption else "")
                 elif tipo == "video":
-                    caption = msg.get("video", {}).get("caption", "")
-                    texto = f"[Video]{': ' + caption if caption else ''}"
+                    vid_data = msg.get("video", {})
+                    caption = vid_data.get("caption", "")
+                    vid_url = vid_data.get("url", "") or (f"https://gate.whapi.cloud/media/{vid_data.get('id')}" if vid_data.get("id") else "")
+                    texto = (f"[Video]({vid_url})" if vid_url else "[Video]") + (f" {caption}" if caption else "")
                 elif tipo == "audio":
                     texto = "[Audio 🎙️]"
                 elif tipo == "document":
