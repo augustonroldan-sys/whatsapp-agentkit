@@ -75,15 +75,16 @@ async def inicializar_db():
     """Crea las tablas si no existen y agrega columnas nuevas."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Agregar columna message_id si no existe (migración suave)
-        try:
-            await conn.execute(
-                __import__("sqlalchemy").text(
-                    "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_id VARCHAR(200) DEFAULT ''"
-                )
-            )
-        except Exception:
-            pass  # SQLite no soporta IF NOT EXISTS — ignorar
+        # Migraciones suaves — agregan columnas si no existen
+        migraciones = [
+            "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_id VARCHAR(200) DEFAULT ''",
+            "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS notas TEXT DEFAULT ''",
+        ]
+        for sql in migraciones:
+            try:
+                await conn.execute(__import__("sqlalchemy").text(sql))
+            except Exception:
+                pass  # SQLite no soporta IF NOT EXISTS — ignorar
 
 
 async def obtener_config(clave: str, default: str = "") -> str:
