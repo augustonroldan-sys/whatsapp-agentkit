@@ -9,7 +9,7 @@ Soporta Kommo CRM (WhatsApp + Instagram) y Meta Cloud API directa.
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -228,51 +228,38 @@ async def api_enviar_mensaje(telefono: str, x_password: str = None, request: Req
     return {"status": "ok"}
 
 
-@app.post("/sincronizar")
-async def sincronizar_chats(x_password: str = None):
-    """
-    Sincroniza todos los chats de Whapi:
-    - Importa nombres reales de contactos
-    - Clasifica cada conversación en el pipeline con IA
-    - Detecta cobros pendientes automáticamente
-    """
-    verificar_password(x_password)
-    logger.info("Iniciando sincronización de chats de Whapi...")
+_sync_estado = {"corriendo": False, "ultimo": None}
 
-    chats = await fetch_chats(count=200)
+
+async def _tarea_sincronizar():
+    """Tarea en background que sincroniza todos los chats."""
+    _sync_estado["corriendo"] = True
     resultados = []
     errores = []
+    chats = await fetch_chats(count=200)
 
     for chat in chats:
         chat_id = chat.get("id", "")
         nombre = chat.get("name", "") or chat.get("last_message", {}).get("from_name", "")
         telefono = chat_id.replace("@s.whatsapp.net", "")
-
         if not telefono or not telefono.isdigit():
             continue
-
         try:
             mensajes = await fetch_mensajes(chat_id, count=100)
             tiene_msgs_de_fedra = any(m.get("from_me") for m in mensajes)
             clasificacion = await clasificar_conversacion_con_ia(chat_id, nombre, mensajes)
-
             await upsert_conversacion(
-                telefono=telefono,
-                nombre=nombre,
+                telefono=telefono, nombre=nombre,
                 etapa=clasificacion.get("etapa", "nuevo"),
                 cobro_pendiente=clasificacion.get("cobro_pendiente", False),
                 monto_cobro=clasificacion.get("monto_cobro") or "",
                 resumen=clasificacion.get("resumen", ""),
                 contacto_existente=tiene_msgs_de_fedra,
             )
-
-            # Importar mensajes al historial local
             await limpiar_historial(telefono)
             for msg in sorted(mensajes, key=lambda m: m.get("timestamp", 0)):
                 tipo = msg.get("type", "")
-                from_me = msg.get("from_me", False)
-                rol = "assistant" if from_me else "user"
-
+                rol = "assistant" if msg.get("from_me") else "user"
                 if tipo == "text":
                     texto = msg.get("text", {}).get("body", "")
                 elif tipo == "image":
@@ -290,30 +277,36 @@ async def sincronizar_chats(x_password: str = None):
                     texto = "[Sticker]"
                 else:
                     texto = f"[{tipo}]"
-
                 if texto:
                     await guardar_mensaje(telefono, rol, texto)
-
-            resultados.append({
-                "telefono": telefono,
-                "nombre": nombre,
-                "etapa": clasificacion.get("etapa"),
-                "cobro_pendiente": clasificacion.get("cobro_pendiente"),
-                "resumen": clasificacion.get("resumen"),
-                "mensajes_importados": len(mensajes),
-            })
-            logger.info(f"Sincronizado {nombre} ({telefono}): {clasificacion.get('etapa')} — {len(mensajes)} msgs")
-
+            resultados.append({"telefono": telefono, "nombre": nombre, "etapa": clasificacion.get("etapa")})
+            logger.info(f"Sync {nombre} ({telefono}): {clasificacion.get('etapa')} — {len(mensajes)} msgs")
         except Exception as e:
-            logger.error(f"Error sincronizando {telefono}: {e}")
+            logger.error(f"Error sync {telefono}: {e}")
             errores.append(telefono)
 
+    _sync_estado["corriendo"] = False
+    _sync_estado["ultimo"] = {"sincronizados": len(resultados), "errores": len(errores), "chats": resultados}
     logger.info(f"Sincronización completa: {len(resultados)} chats, {len(errores)} errores")
+
+
+@app.post("/sincronizar")
+async def sincronizar_chats(background_tasks: BackgroundTasks, x_password: str = None):
+    """Lanza la sincronización en background y retorna inmediatamente."""
+    verificar_password(x_password)
+    if _sync_estado["corriendo"]:
+        return {"status": "ya_corriendo", "mensaje": "Sincronización en progreso..."}
+    background_tasks.add_task(_tarea_sincronizar)
+    return {"status": "iniciada", "mensaje": "Sincronizando en background. Consultá /sincronizar/estado para ver el progreso."}
+
+
+@app.get("/sincronizar/estado")
+async def estado_sincronizacion(x_password: str = None):
+    """Retorna el estado actual de la sincronización."""
+    verificar_password(x_password)
     return {
-        "status": "ok",
-        "sincronizados": len(resultados),
-        "errores": len(errores),
-        "chats": resultados
+        "corriendo": _sync_estado["corriendo"],
+        "ultimo": _sync_estado["ultimo"]
     }
 
 
