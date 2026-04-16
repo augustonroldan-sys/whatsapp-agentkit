@@ -169,12 +169,11 @@ async def webhook_handler(request: Request):
                 img_info = msg_raw.get("image", {})
                 caption = img_info.get("caption", "")
                 media_id = img_info.get("id", "")
-                img_url = img_info.get("url", "") or (f"https://gate.whapi.cloud/media/{media_id}" if media_id else "")
-                texto_crm = f"[Imagen]({img_url})" if img_url else "[Imagen]"
+                # Guardar solo el media_id — el CRM usa el proxy para cargarlo
+                texto_crm = f"[Imagen]({media_id})" if media_id else "[Imagen]"
                 if caption:
                     texto_crm += f" {caption}"
                 await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
-                # Descargar imagen para que Sofia la entienda con Claude Vision
                 imagen_bytes = None
                 imagen_mime = img_info.get("mime_type", "image/jpeg")
                 if media_id:
@@ -183,12 +182,12 @@ async def webhook_handler(request: Request):
             elif tipo == "video":
                 vid_info = msg_raw.get("video", {})
                 caption = vid_info.get("caption", "")
-                vid_url = vid_info.get("url", "") or (f"https://gate.whapi.cloud/media/{vid_info.get('id')}" if vid_info.get("id") else "")
-                texto_crm = f"[Video]({vid_url})" if vid_url else "[Video]"
+                media_id = vid_info.get("id", "")
+                texto_crm = f"[Video]({media_id})" if media_id else "[Video]"
                 if caption:
                     texto_crm += f" {caption}"
                 await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
-                texto = caption if caption else f"El cliente envió un video"
+                texto = caption if caption else "El cliente envió un video"
             elif tipo == "document":
                 doc_info = msg_raw.get("document", {})
                 media_id = doc_info.get("id", "")
@@ -425,13 +424,13 @@ async def _tarea_sincronizar():
                 elif tipo == "image":
                     img_data = msg.get("image", {})
                     caption = img_data.get("caption", "")
-                    img_url = img_data.get("url", "") or (f"https://gate.whapi.cloud/media/{img_data.get('id')}" if img_data.get("id") else "")
-                    texto = (f"[Imagen]({img_url})" if img_url else "[Imagen]") + (f" {caption}" if caption else "")
+                    img_id = img_data.get("id", "")
+                    texto = (f"[Imagen]({img_id})" if img_id else "[Imagen]") + (f" {caption}" if caption else "")
                 elif tipo == "video":
                     vid_data = msg.get("video", {})
                     caption = vid_data.get("caption", "")
-                    vid_url = vid_data.get("url", "") or (f"https://gate.whapi.cloud/media/{vid_data.get('id')}" if vid_data.get("id") else "")
-                    texto = (f"[Video]({vid_url})" if vid_url else "[Video]") + (f" {caption}" if caption else "")
+                    vid_id = vid_data.get("id", "")
+                    texto = (f"[Video]({vid_id})" if vid_id else "[Video]") + (f" {caption}" if caption else "")
                 elif tipo == "audio":
                     audio_id = msg.get("audio", {}).get("id", "")
                     texto = f"[Audio]({audio_id})" if audio_id else "[Audio 🎙️]"
