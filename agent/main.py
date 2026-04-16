@@ -25,6 +25,7 @@ from agent.memory import (
     obtener_conversaciones_para_seguimiento, marcar_seguimiento,
     archivar_conversacion, desarchivar_conversacion,
     obtener_stats_sofia, obtener_telefonos_con_voz,
+    guardar_avatar,
 )
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
@@ -33,6 +34,7 @@ from agent.whapi_helper import (
     descargar_media, extraer_texto_documento,
     enviar_texto_whapi, enviar_imagen_whapi, enviar_documento_whapi,
     enviar_sticker_whapi, reaccionar_whapi, editar_texto_whapi,
+    fetch_avatar_contacto,
 )
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
@@ -153,6 +155,13 @@ async def webhook_handler(request: Request):
             # Guardar nombre real si lo tenemos
             if nombre_contacto:
                 await actualizar_nombre(telefono, nombre_contacto)
+            # Obtener avatar si no lo tenemos aún
+            from agent.memory import obtener_avatar
+            avatar_actual = await obtener_avatar(telefono)
+            if not avatar_actual:
+                avatar_url = await fetch_avatar_contacto(telefono)
+                if avatar_url:
+                    await guardar_avatar(telefono, avatar_url)
 
             # Extraer texto según tipo de mensaje
             texto = None
@@ -432,6 +441,10 @@ async def _tarea_sincronizar():
                 resumen=clasificacion.get("resumen", ""),
                 contacto_existente=tiene_msgs_de_fedra,
             )
+            # Obtener foto de perfil
+            avatar_url = await fetch_avatar_contacto(telefono)
+            if avatar_url:
+                await guardar_avatar(telefono, avatar_url)
             await limpiar_historial(telefono)
             for msg in sorted(mensajes, key=lambda m: m.get("timestamp", 0)):
                 tipo = msg.get("type", "")
@@ -590,6 +603,30 @@ async def preview_seguimiento(x_password: str = None):
     dias = int(await obtener_config("seguimiento_dias", "2"))
     telefonos = await obtener_conversaciones_para_seguimiento(dias)
     return {"pendientes": len(telefonos), "telefonos": telefonos}
+
+
+@app.get("/api/avatar/{telefono}")
+async def api_avatar_proxy(telefono: str, x_password: str = None):
+    """Proxy para servir la foto de perfil de un contacto."""
+    verificar_password(x_password)
+    from agent.memory import obtener_avatar
+    avatar_url = await obtener_avatar(telefono)
+    if not avatar_url:
+        raise HTTPException(status_code=404, detail="Sin avatar")
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.get(avatar_url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=404, detail="Avatar no disponible")
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type=content_type,
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Error al obtener avatar")
 
 
 @app.get("/api/media/{media_id}")

@@ -76,6 +76,25 @@ async def fetch_nombre_contacto(telefono: str) -> str:
         return ""
 
 
+async def fetch_avatar_contacto(telefono: str) -> str:
+    """Obtiene la URL de la foto de perfil del contacto desde Whapi."""
+    if not WHAPI_TOKEN:
+        return ""
+    contact_id = f"{telefono}@s.whatsapp.net" if "@" not in telefono else telefono
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{WHAPI_BASE}/contacts/{contact_id}",
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("avatar", "") or ""
+    except Exception as e:
+        logger.error(f"Error fetching avatar {telefono}: {e}")
+    return ""
+
+
 async def descargar_audio(media_id: str) -> bytes | None:
     """Descarga un archivo de audio desde Whapi."""
     if not WHAPI_TOKEN:

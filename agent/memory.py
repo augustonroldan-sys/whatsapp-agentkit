@@ -61,6 +61,7 @@ class Conversacion(Base):
     notas: Mapped[str] = mapped_column(Text, default="")
     seguimiento_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     archivada: Mapped[bool] = mapped_column(Boolean, default=False)
+    avatar: Mapped[str] = mapped_column(String(500), default="")
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -83,6 +84,7 @@ async def inicializar_db():
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS notas TEXT DEFAULT ''",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS seguimiento_at TIMESTAMP",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS archivada BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS avatar VARCHAR(500) DEFAULT ''",
         ]
         for sql in migraciones:
             try:
@@ -231,6 +233,7 @@ async def listar_conversaciones(incluir_archivadas: bool = False) -> list[dict]:
                 "resumen": conv.resumen or "",
                 "contacto_existente": conv.contacto_existente,
                 "archivada": conv.archivada,
+                "avatar": conv.avatar or "",
                 "actualizado": conv.actualizado.isoformat(),
                 "ultimo_mensaje": msg.content[:100] if msg else "",
                 "ultimo_rol": msg.role if msg else "",
@@ -437,6 +440,27 @@ async def obtener_stats_sofia() -> dict:
             "tasa_respuesta": tasa,
             "mensajes_por_dia": dias,
         }
+
+
+async def obtener_avatar(telefono: str) -> str:
+    """Devuelve la URL del avatar guardado para un contacto."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        return conv.avatar if conv and conv.avatar else ""
+
+
+async def guardar_avatar(telefono: str, avatar_url: str):
+    """Guarda la URL del avatar de un contacto."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.avatar = avatar_url
+            await session.commit()
+        else:
+            session.add(Conversacion(telefono=telefono, avatar=avatar_url))
+            await session.commit()
 
 
 async def obtener_telefonos_con_voz() -> list[str]:
