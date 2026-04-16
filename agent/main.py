@@ -37,7 +37,7 @@ from agent.whapi_helper import (
     fetch_avatar_contacto,
 )
 from agent.providers import obtener_proveedor
-from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
+from agent.tools import detectar_intencion_compra_ia, generar_mensaje_derivacion, enviar_alerta_telegram
 
 load_dotenv()
 
@@ -261,7 +261,7 @@ async def webhook_handler(request: Request):
                 continue
 
             historial = await obtener_historial(telefono)
-            requiere_humano = detectar_intencion_compra(texto)
+            requiere_humano = await detectar_intencion_compra_ia(texto, historial)
 
             if requiere_humano:
                 respuesta = generar_mensaje_derivacion()

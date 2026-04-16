@@ -86,20 +86,76 @@ def buscar_en_knowledge(consulta: str) -> str:
     return "No encontré información específica sobre eso en mis archivos."
 
 
+def _keywords_posible_interes(mensaje: str) -> bool:
+    """Pre-filtro rápido: detecta si el mensaje PODRÍA ser intención de compra."""
+    # Señales de spam/publicidad — descartar inmediatamente
+    spam_signals = ["www.", "http", ".com", ".net", "% off", "% OFF", "mayorista", "mayoristas",
+                    "stockear", "proveedor", "proveedora", "te ofrezco", "te ofrecemos"]
+    msg_lower = mensaje.lower()
+    if any(s in msg_lower for s in spam_signals):
+        return False
+    # Palabras clave de intención real (más específicas)
+    palabras_clave = [
+        "presupuesto", "precio especial", "por mayor",
+        "pedido", "comprar", "compro", "me interesa",
+        "bordado", "estampado", "a medida", "para mi empresa",
+        "por cantidad", "lote", "docena", "docenas",
+        "cerrar", "confirmar", "encargar", "cuánto sale", "cuanto sale",
+        "quiero encargar", "quiero pedir", "quiero comprar",
+        "necesito uniformes", "necesito remeras", "necesito ropa",
+        "cuántas unidades", "cuantas unidades",
+    ]
+    return any(p in msg_lower for p in palabras_clave)
+
+
 def detectar_intencion_compra(mensaje: str) -> bool:
     """
-    Detecta si el cliente tiene intención de compra o quiere un presupuesto.
-    Retorna True si corresponde derivar a Fedra o Agustina.
+    Pre-filtro sincrónico. Usar detectar_intencion_compra_ia para mayor precisión.
     """
-    palabras_clave = [
-        "presupuesto", "precio especial", "cantidad", "por mayor", "mayorista",
-        "pedido", "comprar", "compro", "quiero", "necesito", "cuánto sale",
-        "cuanto sale", "me interesa", "bordado", "estampado", "a medida",
-        "para mi empresa", "por cantidad", "lote", "docena", "docenas",
-        "cerrar", "confirmar", "encargar"
-    ]
-    mensaje_lower = mensaje.lower()
-    return any(palabra in mensaje_lower for palabra in palabras_clave)
+    return _keywords_posible_interes(mensaje)
+
+
+async def detectar_intencion_compra_ia(mensaje: str, historial: list = None) -> bool:
+    """
+    Usa Claude Haiku para determinar con contexto si hay intención real de compra.
+    Solo se llama si el pre-filtro de keywords devuelve True.
+    """
+    if not _keywords_posible_interes(mensaje):
+        return False
+
+    import os
+    from anthropic import AsyncAnthropic
+    client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", "").strip())
+
+    contexto = ""
+    if historial:
+        ultimos = historial[-4:] if len(historial) > 4 else historial
+        contexto = "\n".join([
+            f"{'Cliente' if m['role'] == 'user' else 'Sofia'}: {m['content']}"
+            for m in ultimos
+        ])
+
+    prompt = (
+        f"HeFe Uniformes es un taller que fabrica uniformes de trabajo, escolares y deportivos en Argentina.\n\n"
+        f"Mensaje del cliente: \"{mensaje}\"\n"
+        f"{f'Conversación reciente:{chr(10)}{contexto}' if contexto else ''}\n\n"
+        f"¿Este cliente está mostrando intención REAL de comprar uniformes a HeFe?\n"
+        f"Respondé solo SI o NO.\n"
+        f"NO si: es spam, publicidad, el cliente vende algo, habla de su propio negocio, o el mensaje es ambiguo."
+    )
+
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=5,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        respuesta = response.content[0].text.strip().upper()
+        logger.info(f"Intención compra IA: '{mensaje[:60]}' → {respuesta}")
+        return "SI" in respuesta
+    except Exception as e:
+        logger.error(f"Error detectando intención IA: {e}")
+        return _keywords_posible_interes(mensaje)  # fallback al pre-filtro
 
 
 def generar_mensaje_derivacion() -> str:
