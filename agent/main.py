@@ -22,6 +22,7 @@ from agent.memory import (
     actualizar_nombre, upsert_conversacion,
     obtener_config, guardar_config,
     obtener_notas, guardar_notas,
+    obtener_conversaciones_para_seguimiento, marcar_seguimiento,
 )
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
@@ -45,9 +46,35 @@ proveedor = obtener_proveedor()
 PORT = int(os.getenv("PORT", 8000))
 
 
+async def _loop_seguimiento():
+    """Corre cada hora y envía mensajes de seguimiento automático."""
+    import asyncio
+    await asyncio.sleep(60)  # Esperar a que la app esté lista
+    while True:
+        try:
+            activo = await obtener_config("seguimiento_activo", "false")
+            if activo == "true":
+                dias = int(await obtener_config("seguimiento_dias", "2"))
+                mensaje = await obtener_config(
+                    "seguimiento_mensaje",
+                    "Hola! Quería saber si pudiste ver la información que te mandé. ¿Puedo ayudarte con algo más? 😊"
+                )
+                telefonos = await obtener_conversaciones_para_seguimiento(dias)
+                for telefono in telefonos:
+                    resp_id = await enviar_texto_whapi(telefono, mensaje)
+                    await guardar_mensaje(telefono, "assistant", mensaje, message_id=resp_id)
+                    await marcar_seguimiento(telefono)
+                    logger.info(f"Seguimiento automático enviado a {telefono}")
+        except Exception as e:
+            logger.error(f"Error en loop seguimiento: {e}")
+        await asyncio.sleep(3600)  # Revisar cada hora
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     await inicializar_db()
+    asyncio.create_task(_loop_seguimiento())
     logger.info(f"Servidor AgentKit listo en puerto {PORT}")
     logger.info(f"Proveedor: {proveedor.__class__.__name__}")
     yield
@@ -515,6 +542,38 @@ async def api_guardar_notas(telefono: str, x_password: str = None, request: Requ
     notas = body.get("notas", "")
     await guardar_notas(telefono, notas)
     return {"status": "ok"}
+
+
+@app.post("/seguimiento/forzar")
+async def forzar_seguimiento(x_password: str = None):
+    """Ejecuta el seguimiento ahora sin esperar el loop horario."""
+    verificar_password(x_password)
+    activo = await obtener_config("seguimiento_activo", "false")
+    if activo != "true":
+        return {"status": "desactivado", "mensaje": "El seguimiento automático está desactivado"}
+    dias = int(await obtener_config("seguimiento_dias", "2"))
+    mensaje = await obtener_config(
+        "seguimiento_mensaje",
+        "Hola! Quería saber si pudiste ver la información que te mandé. ¿Puedo ayudarte con algo más? 😊"
+    )
+    telefonos = await obtener_conversaciones_para_seguimiento(dias)
+    enviados = []
+    for telefono in telefonos:
+        resp_id = await enviar_texto_whapi(telefono, mensaje)
+        await guardar_mensaje(telefono, "assistant", mensaje, message_id=resp_id)
+        await marcar_seguimiento(telefono)
+        enviados.append(telefono)
+        logger.info(f"Seguimiento forzado enviado a {telefono}")
+    return {"status": "ok", "enviados": len(enviados), "telefonos": enviados}
+
+
+@app.get("/seguimiento/preview")
+async def preview_seguimiento(x_password: str = None):
+    """Muestra qué contactos recibirían seguimiento ahora (sin enviar)."""
+    verificar_password(x_password)
+    dias = int(await obtener_config("seguimiento_dias", "2"))
+    telefonos = await obtener_conversaciones_para_seguimiento(dias)
+    return {"pendientes": len(telefonos), "telefonos": telefonos}
 
 
 @app.get("/api/media/{media_id}")

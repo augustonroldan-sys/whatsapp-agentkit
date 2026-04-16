@@ -7,7 +7,7 @@ por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Text, DateTime, select, Integer, Boolean
@@ -59,6 +59,7 @@ class Conversacion(Base):
     resumen: Mapped[str] = mapped_column(String(500), default="")
     contacto_existente: Mapped[bool] = mapped_column(Boolean, default=False)
     notas: Mapped[str] = mapped_column(Text, default="")
+    seguimiento_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -79,6 +80,7 @@ async def inicializar_db():
         migraciones = [
             "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_id VARCHAR(200) DEFAULT ''",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS notas TEXT DEFAULT ''",
+            "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS seguimiento_at TIMESTAMP",
         ]
         for sql in migraciones:
             try:
@@ -273,6 +275,51 @@ async def upsert_conversacion(telefono: str, nombre: str = "", etapa: str = "nue
                 contacto_existente=contacto_existente,
             ))
         await session.commit()
+
+
+async def obtener_conversaciones_para_seguimiento(dias: int) -> list[str]:
+    """
+    Retorna teléfonos que necesitan seguimiento:
+    - No derivadas, no cerradas
+    - Último mensaje fue de Sofia (assistant)
+    - Ese mensaje tiene más de `dias` días
+    - No recibieron seguimiento en los últimos `dias` días
+    """
+    cutoff = datetime.utcnow() - timedelta(days=dias)
+    async with async_session() as session:
+        result = await session.execute(
+            select(Conversacion).where(
+                Conversacion.derivada == False,
+                Conversacion.etapa != "cerrado",
+            )
+        )
+        convs = result.scalars().all()
+        telefonos = []
+        for conv in convs:
+            # No re-enviar si ya mandamos seguimiento recientemente
+            if conv.seguimiento_at and conv.seguimiento_at > cutoff:
+                continue
+            # Verificar que el último mensaje sea de Sofia y sea viejo
+            ultimo = await session.execute(
+                select(Mensaje)
+                .where(Mensaje.telefono == conv.telefono)
+                .order_by(Mensaje.timestamp.desc())
+                .limit(1)
+            )
+            msg = ultimo.scalar_one_or_none()
+            if msg and msg.role == "assistant" and msg.timestamp < cutoff:
+                telefonos.append(conv.telefono)
+        return telefonos
+
+
+async def marcar_seguimiento(telefono: str):
+    """Registra que se envió un seguimiento a este contacto ahora."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.seguimiento_at = datetime.utcnow()
+            await session.commit()
 
 
 async def obtener_notas(telefono: str) -> str:
