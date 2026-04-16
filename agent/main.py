@@ -24,7 +24,8 @@ from agent.memory import (
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
     descargar_audio, transcribir_audio, clasificar_conversacion_con_ia,
-    es_contacto_nuevo, analizar_estilo_fedra
+    es_contacto_nuevo, analizar_estilo_fedra,
+    descargar_media, extraer_texto_documento
 )
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
@@ -136,7 +137,32 @@ async def webhook_handler(request: Request):
                 caption = msg_raw.get("video", {}).get("caption", "")
                 texto = caption if caption else None
             elif tipo == "document":
-                texto = None
+                doc_info = msg_raw.get("document", {})
+                media_id = doc_info.get("id", "")
+                nombre_doc = doc_info.get("file_name", "documento")
+                mime_type = doc_info.get("mime_type", "")
+                caption = doc_info.get("caption", "")
+
+                # Guardar en CRM con link descargable
+                url_media = f"https://gate.whapi.cloud/media/{media_id}" if media_id else ""
+                texto_crm = f"[Documento: {nombre_doc}]({url_media})" if url_media else f"[Documento: {nombre_doc}]"
+                await guardar_mensaje(telefono, "user", texto_crm)
+
+                # Intentar extraer texto para que Sofia lo entienda
+                if media_id and nombre_doc.lower().endswith((".pdf", ".docx", ".txt")):
+                    archivo_bytes = await descargar_media(media_id)
+                    if archivo_bytes:
+                        contenido = await extraer_texto_documento(archivo_bytes, nombre_doc)
+                        if contenido:
+                            texto = f"El cliente envió un documento llamado '{nombre_doc}'. Contenido:\n\n{contenido[:3000]}"
+                            if caption:
+                                texto = f"{caption}\n\n{texto}"
+                        else:
+                            texto = caption or f"El cliente envió el archivo '{nombre_doc}' pero no pude leerlo."
+                    else:
+                        texto = caption or f"El cliente envió el archivo '{nombre_doc}'."
+                else:
+                    texto = caption or f"El cliente envió el archivo '{nombre_doc}'."
 
             if not texto:
                 continue

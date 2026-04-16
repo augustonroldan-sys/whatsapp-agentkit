@@ -233,6 +233,57 @@ cobro_pendiente: true si hay deuda, pago pendiente, o mención de dinero adeudad
         return {"etapa": "nuevo", "cobro_pendiente": False, "resumen": "Error al clasificar"}
 
 
+async def descargar_media(media_id: str) -> bytes | None:
+    """Descarga cualquier archivo de media desde Whapi."""
+    if not WHAPI_TOKEN:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"{WHAPI_BASE}/media/{media_id}",
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            if r.status_code == 200:
+                return r.content
+    except Exception as e:
+        logger.error(f"Error descargando media {media_id}: {e}")
+    return None
+
+
+async def extraer_texto_documento(archivo_bytes: bytes, nombre: str) -> str | None:
+    """
+    Extrae el texto de un PDF o Word para que Sofia lo pueda leer.
+    Soporta: .pdf, .docx, .doc, .txt
+    """
+    nombre_lower = nombre.lower()
+    try:
+        if nombre_lower.endswith(".pdf"):
+            import pdfplumber
+            import io
+            texto_paginas = []
+            with pdfplumber.open(io.BytesIO(archivo_bytes)) as pdf:
+                for pagina in pdf.pages[:10]:  # máximo 10 páginas
+                    texto = pagina.extract_text()
+                    if texto:
+                        texto_paginas.append(texto)
+            return "\n\n".join(texto_paginas) if texto_paginas else None
+
+        elif nombre_lower.endswith(".docx"):
+            import docx
+            import io
+            doc = docx.Document(io.BytesIO(archivo_bytes))
+            parrafos = [p.text for p in doc.paragraphs if p.text.strip()]
+            return "\n".join(parrafos) if parrafos else None
+
+        elif nombre_lower.endswith(".txt"):
+            return archivo_bytes.decode("utf-8", errors="ignore")
+
+    except Exception as e:
+        logger.error(f"Error extrayendo texto de {nombre}: {e}")
+
+    return None
+
+
 async def es_contacto_nuevo(telefono: str, dias: int = 30) -> bool:
     """
     Determina si un contacto es nuevo o ya tiene historial con Fedra.
