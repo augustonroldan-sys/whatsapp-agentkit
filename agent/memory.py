@@ -38,6 +38,7 @@ class Mensaje(Base):
     telefono: Mapped[str] = mapped_column(String(50), index=True)
     role: Mapped[str] = mapped_column(String(20))  # "user" o "assistant"
     content: Mapped[str] = mapped_column(Text)
+    message_id: Mapped[str] = mapped_column(String(200), default="")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -61,18 +62,28 @@ class Conversacion(Base):
 
 
 async def inicializar_db():
-    """Crea las tablas si no existen."""
+    """Crea las tablas si no existen y agrega columnas nuevas."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Agregar columna message_id si no existe (migración suave)
+        try:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_id VARCHAR(200) DEFAULT ''"
+                )
+            )
+        except Exception:
+            pass  # SQLite no soporta IF NOT EXISTS — ignorar
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str):
+async def guardar_mensaje(telefono: str, role: str, content: str, message_id: str = ""):
     """Guarda un mensaje en el historial de conversación."""
     async with async_session() as session:
         mensaje = Mensaje(
             telefono=telefono,
             role=role,
             content=content,
+            message_id=message_id,
             timestamp=datetime.utcnow()
         )
         session.add(mensaje)
@@ -104,7 +115,7 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
         mensajes.reverse()
 
         return [
-            {"role": msg.role, "content": msg.content}
+            {"role": msg.role, "content": msg.content, "message_id": msg.message_id or ""}
             for msg in mensajes
         ]
 

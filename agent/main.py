@@ -25,7 +25,9 @@ from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
     descargar_audio, transcribir_audio, clasificar_conversacion_con_ia,
     es_contacto_nuevo, analizar_estilo_fedra,
-    descargar_media, extraer_texto_documento
+    descargar_media, extraer_texto_documento,
+    enviar_texto_whapi, enviar_imagen_whapi, enviar_documento_whapi,
+    enviar_sticker_whapi, reaccionar_whapi, editar_texto_whapi,
 )
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
@@ -99,6 +101,7 @@ async def webhook_handler(request: Request):
                 continue
 
             tipo = msg_raw.get("type", "")
+            msg_id_entrante = msg_raw.get("id", "")
             nombre_contacto = msg_raw.get("from_name", "") or await fetch_nombre_contacto(telefono)
 
             # Guardar nombre real si lo tenemos
@@ -179,7 +182,7 @@ async def webhook_handler(request: Request):
             if not es_nuevo:
                 logger.info(f"Contacto {telefono} ya tiene historial con Fedra — Sofia no responde")
                 # Igual guardamos el mensaje para el CRM
-                await guardar_mensaje(telefono, "user", texto)
+                await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
                 continue
 
             historial = await obtener_historial(telefono)
@@ -187,19 +190,19 @@ async def webhook_handler(request: Request):
 
             if requiere_humano:
                 respuesta = generar_mensaje_derivacion()
-                await guardar_mensaje(telefono, "user", texto)
-                await guardar_mensaje(telefono, "assistant", respuesta)
+                await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
+                resp_id = await enviar_texto_whapi(telefono, respuesta)
+                await guardar_mensaje(telefono, "assistant", respuesta, message_id=resp_id)
                 await marcar_derivado(telefono)
                 await enviar_alerta_telegram(nombre_contacto or telefono, texto)
-                await proveedor.enviar_mensaje(telefono, respuesta)
                 logger.info(f"Conversación {telefono} derivada a humano")
                 continue
 
             # Sofia responde
             respuesta = await generar_respuesta(texto, historial)
-            await guardar_mensaje(telefono, "user", texto)
-            await guardar_mensaje(telefono, "assistant", respuesta)
-            await proveedor.enviar_mensaje(telefono, respuesta)
+            await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
+            resp_id = await enviar_texto_whapi(telefono, respuesta)
+            await guardar_mensaje(telefono, "assistant", respuesta, message_id=resp_id)
             logger.info(f"Sofia respondió a {nombre_contacto or telefono}: {respuesta}")
 
         return {"status": "ok"}
@@ -246,12 +249,80 @@ async def api_enviar_mensaje(telefono: str, x_password: str = None, request: Req
     verificar_password(x_password)
     body = await request.json()
     texto = body.get("mensaje", "").strip()
+    quoted_id = body.get("quoted_id", "")
     if not texto:
         raise HTTPException(status_code=400, detail="Mensaje vacío")
-    await proveedor.enviar_mensaje(telefono, texto)
-    await guardar_mensaje(telefono, "assistant", texto)
+    msg_id = await enviar_texto_whapi(telefono, texto, quoted_id=quoted_id)
+    await guardar_mensaje(telefono, "assistant", texto, message_id=msg_id)
     logger.info(f"Mensaje manual enviado a {telefono}: {texto}")
-    return {"status": "ok"}
+    return {"status": "ok", "message_id": msg_id}
+
+
+@app.post("/api/conversaciones/{telefono}/enviar-media")
+async def api_enviar_media(telefono: str, x_password: str = None, request: Request = None):
+    """CRM — envía imagen, documento o sticker a un cliente."""
+    verificar_password(x_password)
+    form = await request.form()
+    tipo = str(form.get("tipo", "imagen"))
+    caption = str(form.get("caption", ""))
+    quoted_id = str(form.get("quoted_id", ""))
+    archivo = form.get("archivo")
+    if not archivo or not hasattr(archivo, "read"):
+        raise HTTPException(status_code=400, detail="Sin archivo")
+    archivo_bytes = await archivo.read()
+    mime_type = archivo.content_type or "application/octet-stream"
+    filename = archivo.filename or "archivo"
+
+    if tipo == "imagen":
+        msg_id = await enviar_imagen_whapi(telefono, archivo_bytes, mime_type, caption, quoted_id)
+        texto_crm = f"[Imagen]{': ' + caption if caption else ''}"
+    elif tipo == "documento":
+        msg_id = await enviar_documento_whapi(telefono, archivo_bytes, mime_type, filename, caption, quoted_id)
+        texto_crm = f"[Documento: {filename}]"
+    elif tipo == "sticker":
+        msg_id = await enviar_sticker_whapi(telefono, archivo_bytes, mime_type)
+        texto_crm = "[Sticker]"
+    else:
+        raise HTTPException(status_code=400, detail="Tipo inválido")
+
+    await guardar_mensaje(telefono, "assistant", texto_crm, message_id=msg_id)
+    logger.info(f"Media ({tipo}) enviada a {telefono}")
+    return {"status": "ok", "message_id": msg_id}
+
+
+@app.post("/api/conversaciones/{telefono}/reaccionar")
+async def api_reaccionar(telefono: str, x_password: str = None, request: Request = None):
+    """CRM — envía una reacción emoji a un mensaje del cliente."""
+    verificar_password(x_password)
+    body = await request.json()
+    message_id = body.get("message_id", "")
+    emoji = body.get("emoji", "")
+    if not message_id or not emoji:
+        raise HTTPException(status_code=400, detail="Faltan message_id o emoji")
+    ok = await reaccionar_whapi(message_id, emoji)
+    return {"status": "ok" if ok else "error"}
+
+
+@app.patch("/api/conversaciones/{telefono}/mensajes/{message_id}")
+async def api_editar_mensaje(telefono: str, message_id: str, x_password: str = None, request: Request = None):
+    """CRM — edita un mensaje de texto enviado por Fedra."""
+    verificar_password(x_password)
+    body = await request.json()
+    nuevo_texto = body.get("texto", "").strip()
+    if not nuevo_texto:
+        raise HTTPException(status_code=400, detail="Texto vacío")
+    ok = await editar_texto_whapi(message_id, nuevo_texto)
+    if ok:
+        from sqlalchemy import update as sql_update
+        from agent.memory import Mensaje as MensajeModel
+        async with async_session() as session:
+            await session.execute(
+                sql_update(MensajeModel)
+                .where(MensajeModel.message_id == message_id)
+                .values(content=nuevo_texto)
+            )
+            await session.commit()
+    return {"status": "ok" if ok else "error"}
 
 
 _sync_estado = {"corriendo": False, "ultimo": None}

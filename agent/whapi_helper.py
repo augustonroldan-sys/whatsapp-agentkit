@@ -284,6 +284,132 @@ async def extraer_texto_documento(archivo_bytes: bytes, nombre: str) -> str | No
     return None
 
 
+async def enviar_texto_whapi(telefono: str, texto: str, quoted_id: str = "") -> str:
+    """Envía texto via Whapi. Retorna el message_id."""
+    destinatario = f"{telefono}@s.whatsapp.net" if "@" not in telefono else telefono
+    payload: dict = {"to": destinatario, "body": texto}
+    if quoted_id:
+        payload["context"] = {"message_id": quoted_id}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{WHAPI_BASE}/messages/text",
+                json=payload,
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.json().get("id", "")
+    except Exception as e:
+        logger.error(f"Error enviando texto Whapi: {e}")
+        return ""
+
+
+async def enviar_imagen_whapi(telefono: str, imagen_bytes: bytes, mime_type: str,
+                               caption: str = "", quoted_id: str = "") -> str:
+    """Envía una imagen via Whapi. Retorna el message_id."""
+    import base64
+    destinatario = f"{telefono}@s.whatsapp.net" if "@" not in telefono else telefono
+    b64 = base64.b64encode(imagen_bytes).decode()
+    payload: dict = {
+        "to": destinatario,
+        "image": {"data": f"data:{mime_type};base64,{b64}"},
+        "caption": caption,
+    }
+    if quoted_id:
+        payload["context"] = {"message_id": quoted_id}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{WHAPI_BASE}/messages/image",
+                json=payload,
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.json().get("id", "")
+    except Exception as e:
+        logger.error(f"Error enviando imagen Whapi: {e}")
+        return ""
+
+
+async def enviar_documento_whapi(telefono: str, doc_bytes: bytes, mime_type: str,
+                                  filename: str, caption: str = "", quoted_id: str = "") -> str:
+    """Envía un documento via Whapi. Retorna el message_id."""
+    import base64
+    destinatario = f"{telefono}@s.whatsapp.net" if "@" not in telefono else telefono
+    b64 = base64.b64encode(doc_bytes).decode()
+    payload: dict = {
+        "to": destinatario,
+        "document": {
+            "data": f"data:{mime_type};base64,{b64}",
+            "filename": filename,
+        },
+        "caption": caption,
+    }
+    if quoted_id:
+        payload["context"] = {"message_id": quoted_id}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{WHAPI_BASE}/messages/document",
+                json=payload,
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.json().get("id", "")
+    except Exception as e:
+        logger.error(f"Error enviando documento Whapi: {e}")
+        return ""
+
+
+async def enviar_sticker_whapi(telefono: str, sticker_bytes: bytes, mime_type: str = "image/webp") -> str:
+    """Envía un sticker via Whapi. Retorna el message_id."""
+    import base64
+    destinatario = f"{telefono}@s.whatsapp.net" if "@" not in telefono else telefono
+    b64 = base64.b64encode(sticker_bytes).decode()
+    payload = {
+        "to": destinatario,
+        "sticker": {"data": f"data:{mime_type};base64,{b64}"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{WHAPI_BASE}/messages/sticker",
+                json=payload,
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.json().get("id", "")
+    except Exception as e:
+        logger.error(f"Error enviando sticker Whapi: {e}")
+        return ""
+
+
+async def reaccionar_whapi(message_id: str, emoji: str) -> bool:
+    """Envía una reacción a un mensaje de WhatsApp."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{WHAPI_BASE}/messages/reaction/{message_id}",
+                json={"emoji": emoji},
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.status_code in (200, 201)
+    except Exception as e:
+        logger.error(f"Error enviando reacción Whapi: {e}")
+        return False
+
+
+async def editar_texto_whapi(message_id: str, nuevo_texto: str) -> bool:
+    """Edita un mensaje de texto enviado por nosotros."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.patch(
+                f"{WHAPI_BASE}/messages/text/{message_id}",
+                json={"body": nuevo_texto},
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
+            )
+            return r.status_code in (200, 201)
+    except Exception as e:
+        logger.error(f"Error editando mensaje Whapi: {e}")
+        return False
+
+
 async def es_contacto_nuevo(telefono: str, dias: int = 30) -> bool:
     """
     Determina si un contacto es nuevo o ya tiene historial con Fedra.
