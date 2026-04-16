@@ -23,6 +23,8 @@ from agent.memory import (
     obtener_config, guardar_config,
     obtener_notas, guardar_notas,
     obtener_conversaciones_para_seguimiento, marcar_seguimiento,
+    archivar_conversacion, desarchivar_conversacion,
+    obtener_stats_sofia, obtener_telefonos_con_voz,
 )
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
@@ -283,10 +285,10 @@ def verificar_password(x_password: str = None):
 
 
 @app.get("/api/conversaciones")
-async def api_conversaciones(x_password: str = None):
+async def api_conversaciones(x_password: str = None, incluir_archivadas: bool = False):
     """CRM — lista todas las conversaciones."""
     verificar_password(x_password)
-    return await listar_conversaciones()
+    return await listar_conversaciones(incluir_archivadas=incluir_archivadas)
 
 
 @app.get("/api/conversaciones/{telefono}")
@@ -592,6 +594,135 @@ async def api_media_proxy(media_id: str, x_password: str = None):
             media_type=content_type,
             headers={"Cache-Control": "private, max-age=3600"},
         )
+
+
+@app.post("/api/conversaciones/{telefono}/resumen")
+async def api_generar_resumen(telefono: str, x_password: str = None):
+    """CRM — genera un resumen IA de la conversación y lo guarda."""
+    verificar_password(x_password)
+    historial = await obtener_historial(telefono, limite=50)
+    if not historial:
+        return {"status": "ok", "resumen": "Sin mensajes para resumir"}
+
+    # Filtrar solo mensajes de texto (no media)
+    lineas = []
+    for msg in historial:
+        if not msg["content"].startswith("["):
+            rol = "Cliente" if msg["role"] == "user" else "Sofia"
+            lineas.append(f"{rol}: {msg['content']}")
+    texto_conv = "\n".join(lineas[:60])
+
+    if not texto_conv.strip():
+        return {"status": "ok", "resumen": "Solo hay mensajes multimedia en esta conversación"}
+
+    from agent.brain import client, MODELO_RAPIDO
+    response = await client.messages.create(
+        model=MODELO_RAPIDO,
+        max_tokens=150,
+        system="Resumí conversaciones de ventas en 1-2 oraciones en español rioplatense. Solo el resumen, sin introducción.",
+        messages=[{"role": "user", "content": f"Resumí:\n\n{texto_conv[:3000]}"}],
+    )
+    resumen = response.content[0].text.strip()
+
+    from sqlalchemy import update as sql_update
+    async with async_session() as session:
+        await session.execute(
+            sql_update(Conversacion)
+            .where(Conversacion.telefono == telefono)
+            .values(resumen=resumen)
+        )
+        await session.commit()
+
+    logger.info(f"Resumen IA generado para {telefono}")
+    return {"status": "ok", "resumen": resumen}
+
+
+@app.post("/api/conversaciones/{telefono}/archivar")
+async def api_archivar(telefono: str, x_password: str = None):
+    """CRM — archiva una conversación (queda oculta por defecto)."""
+    verificar_password(x_password)
+    await archivar_conversacion(telefono)
+    logger.info(f"Conversación {telefono} archivada")
+    return {"status": "ok"}
+
+
+@app.post("/api/conversaciones/{telefono}/desarchivar")
+async def api_desarchivar(telefono: str, x_password: str = None):
+    """CRM — desarchiva una conversación."""
+    verificar_password(x_password)
+    await desarchivar_conversacion(telefono)
+    logger.info(f"Conversación {telefono} desarchivada")
+    return {"status": "ok"}
+
+
+@app.get("/api/stats/sofia")
+async def api_stats_sofia(x_password: str = None):
+    """CRM — estadísticas de actividad de Sofia."""
+    verificar_password(x_password)
+    return await obtener_stats_sofia()
+
+
+_resync_voz_estado = {"corriendo": False, "ultimo": None}
+
+
+@app.post("/resync-audios")
+async def resync_audios_viejos(background_tasks: BackgroundTasks, x_password: str = None):
+    """Re-sincroniza las conversaciones que tienen mensajes [voz] viejos."""
+    verificar_password(x_password)
+    if _resync_voz_estado["corriendo"]:
+        return {"status": "ya_corriendo"}
+
+    async def _tarea_resync():
+        _resync_voz_estado["corriendo"] = True
+        telefonos = await obtener_telefonos_con_voz()
+        procesados, errores = 0, 0
+        for telefono in telefonos:
+            chat_id = f"{telefono}@s.whatsapp.net"
+            try:
+                mensajes = await fetch_mensajes(chat_id, count=100)
+                await limpiar_historial(telefono)
+                for msg in sorted(mensajes, key=lambda m: m.get("timestamp", 0)):
+                    tipo = msg.get("type", "")
+                    rol = "assistant" if msg.get("from_me") else "user"
+                    if tipo == "text":
+                        texto = msg.get("text", {}).get("body", "")
+                    elif tipo == "audio":
+                        audio_id = msg.get("audio", {}).get("id", "")
+                        texto = f"[Audio]({audio_id})" if audio_id else "[Audio 🎙️]"
+                    elif tipo == "image":
+                        img_id = msg.get("image", {}).get("id", "")
+                        caption = msg.get("image", {}).get("caption", "")
+                        texto = (f"[Imagen]({img_id})" if img_id else "[Imagen]") + (f" {caption}" if caption else "")
+                    elif tipo == "video":
+                        vid_id = msg.get("video", {}).get("id", "")
+                        caption = msg.get("video", {}).get("caption", "")
+                        texto = (f"[Video]({vid_id})" if vid_id else "[Video]") + (f" {caption}" if caption else "")
+                    elif tipo == "document":
+                        nombre_doc = msg.get("document", {}).get("file_name", "archivo")
+                        texto = f"[Documento: {nombre_doc}]"
+                    elif tipo == "sticker":
+                        texto = "[Sticker]"
+                    else:
+                        texto = f"[{tipo}]"
+                    if texto:
+                        await guardar_mensaje(telefono, rol, texto)
+                procesados += 1
+            except Exception as e:
+                logger.error(f"Error resync-audios {telefono}: {e}")
+                errores += 1
+        _resync_voz_estado["corriendo"] = False
+        _resync_voz_estado["ultimo"] = {"procesados": procesados, "errores": errores, "total": len(telefonos)}
+        logger.info(f"Resync audios completo: {procesados} conversaciones, {errores} errores")
+
+    background_tasks.add_task(_tarea_resync)
+    return {"status": "iniciado", "mensaje": "Re-sincronizando audios en background"}
+
+
+@app.get("/resync-audios/estado")
+async def estado_resync_audios(x_password: str = None):
+    """Estado del resync de audios."""
+    verificar_password(x_password)
+    return _resync_voz_estado
 
 
 @app.post("/reactivar/{telefono}")

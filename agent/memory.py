@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, Integer, Boolean
+from sqlalchemy import String, Text, DateTime, select, Integer, Boolean, func
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,6 +60,7 @@ class Conversacion(Base):
     contacto_existente: Mapped[bool] = mapped_column(Boolean, default=False)
     notas: Mapped[str] = mapped_column(Text, default="")
     seguimiento_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    archivada: Mapped[bool] = mapped_column(Boolean, default=False)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -81,6 +82,7 @@ async def inicializar_db():
             "ALTER TABLE mensajes ADD COLUMN IF NOT EXISTS message_id VARCHAR(200) DEFAULT ''",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS notas TEXT DEFAULT ''",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS seguimiento_at TIMESTAMP",
+            "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS archivada BOOLEAN DEFAULT FALSE",
         ]
         for sql in migraciones:
             try:
@@ -202,12 +204,13 @@ async def actualizar_etapa(telefono: str, etapa: str):
             await session.commit()
 
 
-async def listar_conversaciones() -> list[dict]:
+async def listar_conversaciones(incluir_archivadas: bool = False) -> list[dict]:
     """Retorna todas las conversaciones con su último mensaje."""
     async with async_session() as session:
-        result = await session.execute(
-            select(Conversacion).order_by(Conversacion.actualizado.desc())
-        )
+        query = select(Conversacion).order_by(Conversacion.actualizado.desc())
+        if not incluir_archivadas:
+            query = query.where(Conversacion.archivada == False)
+        result = await session.execute(query)
         convs = result.scalars().all()
         output = []
         for conv in convs:
@@ -227,6 +230,7 @@ async def listar_conversaciones() -> list[dict]:
                 "monto_cobro": conv.monto_cobro or "",
                 "resumen": conv.resumen or "",
                 "contacto_existente": conv.contacto_existente,
+                "archivada": conv.archivada,
                 "actualizado": conv.actualizado.isoformat(),
                 "ultimo_mensaje": msg.content[:100] if msg else "",
                 "ultimo_rol": msg.role if msg else "",
@@ -357,3 +361,88 @@ async def reactivar_conversacion(telefono: str):
             conv.derivada = False
             conv.actualizado = datetime.utcnow()
             await session.commit()
+
+
+async def archivar_conversacion(telefono: str):
+    """Archiva una conversación — queda oculta por defecto en el CRM."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.archivada = True
+            conv.actualizado = datetime.utcnow()
+            await session.commit()
+
+
+async def desarchivar_conversacion(telefono: str):
+    """Desarchiva una conversación."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.archivada = False
+            conv.actualizado = datetime.utcnow()
+            await session.commit()
+
+
+async def obtener_stats_sofia() -> dict:
+    """Devuelve estadísticas de actividad de Sofia para el dashboard."""
+    from collections import defaultdict
+    async with async_session() as session:
+        # Total mensajes de Sofia
+        r = await session.execute(select(func.count(Mensaje.id)).where(Mensaje.role == "assistant"))
+        total_sofia = r.scalar() or 0
+
+        # Total mensajes de clientes
+        r = await session.execute(select(func.count(Mensaje.id)).where(Mensaje.role == "user"))
+        total_clientes = r.scalar() or 0
+
+        # Conversaciones donde Sofia respondió al menos una vez
+        r = await session.execute(
+            select(func.count(func.distinct(Mensaje.telefono))).where(Mensaje.role == "assistant")
+        )
+        convs_con_respuesta = r.scalar() or 0
+
+        # Total conversaciones
+        r = await session.execute(select(func.count(Conversacion.id)))
+        total_convs = r.scalar() or 0
+
+        # Mensajes últimos 7 días
+        desde = datetime.utcnow() - timedelta(days=7)
+        r = await session.execute(
+            select(Mensaje.timestamp, Mensaje.role).where(Mensaje.timestamp >= desde)
+        )
+        msgs_recientes = r.all()
+
+        por_dia: dict = defaultdict(lambda: {"sofia": 0, "clientes": 0})
+        for msg_ts, msg_role in msgs_recientes:
+            dia = msg_ts.strftime("%Y-%m-%d")
+            if msg_role == "assistant":
+                por_dia[dia]["sofia"] += 1
+            else:
+                por_dia[dia]["clientes"] += 1
+
+        dias = []
+        for i in range(6, -1, -1):
+            d = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
+            dias.append({"fecha": d, "sofia": por_dia[d]["sofia"], "clientes": por_dia[d]["clientes"]})
+
+        tasa = round((convs_con_respuesta / total_convs * 100) if total_convs > 0 else 0)
+
+        return {
+            "total_mensajes_sofia": total_sofia,
+            "total_mensajes_clientes": total_clientes,
+            "conversaciones_con_respuesta": convs_con_respuesta,
+            "total_conversaciones": total_convs,
+            "tasa_respuesta": tasa,
+            "mensajes_por_dia": dias,
+        }
+
+
+async def obtener_telefonos_con_voz() -> list[str]:
+    """Retorna teléfonos que tienen mensajes guardados como [voz] (formato viejo)."""
+    async with async_session() as session:
+        r = await session.execute(
+            select(func.distinct(Mensaje.telefono)).where(Mensaje.content == "[voz]")
+        )
+        return [row[0] for row in r.all()]
