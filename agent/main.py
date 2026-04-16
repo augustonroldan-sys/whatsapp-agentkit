@@ -72,11 +72,26 @@ async def _loop_seguimiento():
         await asyncio.sleep(3600)  # Revisar cada hora
 
 
+async def _loop_sync_diario():
+    """Sync completo de todos los chats una vez al día."""
+    import asyncio
+    await asyncio.sleep(120)  # Esperar 2 min al arrancar para hacer el primer sync
+    while True:
+        try:
+            logger.info("Iniciando sync automático diario...")
+            await _tarea_sincronizar()
+            logger.info("Sync automático diario completado")
+        except Exception as e:
+            logger.error(f"Error en sync diario: {e}")
+        await asyncio.sleep(86400)  # Repetir cada 24 horas
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
     await inicializar_db()
     asyncio.create_task(_loop_seguimiento())
+    asyncio.create_task(_loop_sync_diario())
     logger.info(f"Servidor AgentKit listo en puerto {PORT}")
     logger.info(f"Proveedor: {proveedor.__class__.__name__}")
     yield
