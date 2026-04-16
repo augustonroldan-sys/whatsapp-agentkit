@@ -15,7 +15,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, esta_derivado, marcar_derivado, listar_conversaciones, actualizar_etapa, limpiar_historial, async_session, Conversacion
+from agent.memory import (
+    inicializar_db, guardar_mensaje, obtener_historial, esta_derivado,
+    marcar_derivado, listar_conversaciones, actualizar_etapa,
+    limpiar_historial, async_session, Conversacion,
+    actualizar_nombre, upsert_conversacion
+)
+from agent.whapi_helper import (
+    fetch_chats, fetch_mensajes, fetch_nombre_contacto,
+    descargar_audio, transcribir_audio, clasificar_conversacion_con_ia,
+    es_contacto_nuevo, analizar_estilo_fedra
+)
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra, generar_mensaje_derivacion, enviar_alerta_telegram
 
@@ -69,69 +79,102 @@ async def webhook_verificacion(request: Request):
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
-    Recibe mensajes de WhatsApp o Instagram via Kommo (o Meta directa).
-    Sofia responde automáticamente a todos los mensajes nuevos.
-    Si detecta intención de presupuesto/compra → deriva a Fedra o Agustina.
+    Recibe mensajes de WhatsApp.
+    - Solo responde a contactos NUEVOS (sin historial con Fedra)
+    - Transcribe audios automáticamente
+    - Guarda el nombre real del contacto
+    - Si detecta intención de compra → deriva a Fedra
     """
     try:
-        mensajes = await proveedor.parsear_webhook(request)
+        body = await request.json()
+        mensajes_raw = body.get("messages", [])
 
-        for msg in mensajes:
-            if msg.es_propio or not msg.texto:
+        for msg_raw in mensajes_raw:
+            if msg_raw.get("from_me", False):
                 continue
 
-            logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
-
-            # Si la conversación ya fue derivada a un humano → Sofia no responde más
-            if await esta_derivado(msg.telefono):
-                logger.info(f"Conversación {msg.telefono} derivada a humano — Sofia no interviene")
+            telefono = msg_raw.get("from", "") or msg_raw.get("chat_id", "").replace("@s.whatsapp.net", "")
+            if not telefono:
                 continue
 
-            # Obtener historial antes de agregar el mensaje actual
-            historial = await obtener_historial(msg.telefono)
+            tipo = msg_raw.get("type", "")
+            nombre_contacto = msg_raw.get("from_name", "") or await fetch_nombre_contacto(telefono)
 
-            # Detectar si el cliente quiere presupuesto/compra ANTES de responder
-            requiere_humano = detectar_intencion_compra(msg.texto)
+            # Guardar nombre real si lo tenemos
+            if nombre_contacto:
+                await actualizar_nombre(telefono, nombre_contacto)
+
+            # Extraer texto según tipo de mensaje
+            texto = None
+            if tipo == "text":
+                texto = msg_raw.get("text", {}).get("body", "")
+            elif tipo == "audio":
+                # Transcribir audio
+                audio_info = msg_raw.get("audio", {})
+                media_id = audio_info.get("id", "")
+                mime_type = audio_info.get("mime_type", "audio/ogg")
+                if media_id:
+                    audio_bytes = await descargar_audio(media_id)
+                    if audio_bytes:
+                        texto = await transcribir_audio(audio_bytes, mime_type)
+                        if texto:
+                            logger.info(f"Audio transcripto de {telefono}: {texto}")
+                        else:
+                            texto = "[Audio recibido — no se pudo transcribir]"
+                    else:
+                        texto = "[Audio recibido — no se pudo descargar]"
+                if not texto or texto.startswith("[Audio"):
+                    await proveedor.enviar_mensaje(
+                        telefono,
+                        "Recibí tu audio 🎙️ Por ahora no puedo escucharlo. ¿Podés escribirme lo que necesitás?"
+                    )
+                    continue
+            elif tipo == "image":
+                caption = msg_raw.get("image", {}).get("caption", "")
+                texto = caption if caption else None
+            elif tipo == "video":
+                caption = msg_raw.get("video", {}).get("caption", "")
+                texto = caption if caption else None
+            elif tipo == "document":
+                texto = None
+
+            if not texto:
+                continue
+
+            logger.info(f"Mensaje de {nombre_contacto or telefono}: {texto}")
+
+            # Si ya fue derivada → Sofia no interviene
+            if await esta_derivado(telefono):
+                logger.info(f"Conversación {telefono} derivada — Sofia no interviene")
+                continue
+
+            # Verificar si es contacto nuevo (sin historial con Fedra)
+            es_nuevo = await es_contacto_nuevo(telefono)
+            if not es_nuevo:
+                logger.info(f"Contacto {telefono} ya tiene historial con Fedra — Sofia no responde")
+                # Igual guardamos el mensaje para el CRM
+                await guardar_mensaje(telefono, "user", texto)
+                continue
+
+            historial = await obtener_historial(telefono)
+            requiere_humano = detectar_intencion_compra(texto)
 
             if requiere_humano:
-                # Sofia envía el mensaje de derivación y luego cede el control
                 respuesta = generar_mensaje_derivacion()
-
-                await guardar_mensaje(msg.telefono, "user", msg.texto)
-                await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                await marcar_derivado(msg.telefono)
-                await enviar_alerta_telegram(msg.telefono, msg.texto)
-
-                # Enviar respuesta al cliente
-                talk_id = msg.__dict__.get("_talk_id")
-                if talk_id and hasattr(proveedor, "enviar_mensaje_por_talk"):
-                    await proveedor.enviar_mensaje_por_talk(talk_id, respuesta)
-                    # Agregar nota en Kommo para el equipo
-                    await proveedor.asignar_lead_a_humano(
-                        talk_id=talk_id,
-                        contacto_nombre=msg.telefono,
-                        contexto=msg.texto
-                    )
-                else:
-                    await proveedor.enviar_mensaje(msg.telefono, respuesta)
-
-                logger.info(f"Conversación {msg.telefono} derivada a humano")
+                await guardar_mensaje(telefono, "user", texto)
+                await guardar_mensaje(telefono, "assistant", respuesta)
+                await marcar_derivado(telefono)
+                await enviar_alerta_telegram(nombre_contacto or telefono, texto)
+                await proveedor.enviar_mensaje(telefono, respuesta)
+                logger.info(f"Conversación {telefono} derivada a humano")
                 continue
 
-            # Consulta normal → Sofia responde con Claude
-            respuesta = await generar_respuesta(msg.texto, historial)
-
-            await guardar_mensaje(msg.telefono, "user", msg.texto)
-            await guardar_mensaje(msg.telefono, "assistant", respuesta)
-
-            # Enviar respuesta (Kommo usa talk_id, Meta usa telefono)
-            talk_id = msg.__dict__.get("_talk_id")
-            if talk_id and hasattr(proveedor, "enviar_mensaje_por_talk"):
-                await proveedor.enviar_mensaje_por_talk(talk_id, respuesta)
-            else:
-                await proveedor.enviar_mensaje(msg.telefono, respuesta)
-
-            logger.info(f"Sofia respondió a {msg.telefono}: {respuesta}")
+            # Sofia responde
+            respuesta = await generar_respuesta(texto, historial)
+            await guardar_mensaje(telefono, "user", texto)
+            await guardar_mensaje(telefono, "assistant", respuesta)
+            await proveedor.enviar_mensaje(telefono, respuesta)
+            logger.info(f"Sofia respondió a {nombre_contacto or telefono}: {respuesta}")
 
         return {"status": "ok"}
 
@@ -183,6 +226,79 @@ async def api_enviar_mensaje(telefono: str, x_password: str = None, request: Req
     await guardar_mensaje(telefono, "assistant", texto)
     logger.info(f"Mensaje manual enviado a {telefono}: {texto}")
     return {"status": "ok"}
+
+
+@app.post("/sincronizar")
+async def sincronizar_chats(x_password: str = None):
+    """
+    Sincroniza todos los chats de Whapi:
+    - Importa nombres reales de contactos
+    - Clasifica cada conversación en el pipeline con IA
+    - Detecta cobros pendientes automáticamente
+    """
+    verificar_password(x_password)
+    logger.info("Iniciando sincronización de chats de Whapi...")
+
+    chats = await fetch_chats(count=200)
+    resultados = []
+    errores = []
+
+    for chat in chats:
+        chat_id = chat.get("id", "")
+        nombre = chat.get("name", "") or chat.get("last_message", {}).get("from_name", "")
+        telefono = chat_id.replace("@s.whatsapp.net", "")
+
+        if not telefono or not telefono.isdigit():
+            continue
+
+        try:
+            mensajes = await fetch_mensajes(chat_id, count=40)
+            tiene_msgs_de_fedra = any(m.get("from_me") for m in mensajes)
+            clasificacion = await clasificar_conversacion_con_ia(chat_id, nombre, mensajes)
+
+            await upsert_conversacion(
+                telefono=telefono,
+                nombre=nombre,
+                etapa=clasificacion.get("etapa", "nuevo"),
+                cobro_pendiente=clasificacion.get("cobro_pendiente", False),
+                monto_cobro=clasificacion.get("monto_cobro") or "",
+                resumen=clasificacion.get("resumen", ""),
+                contacto_existente=tiene_msgs_de_fedra,
+            )
+
+            resultados.append({
+                "telefono": telefono,
+                "nombre": nombre,
+                "etapa": clasificacion.get("etapa"),
+                "cobro_pendiente": clasificacion.get("cobro_pendiente"),
+                "resumen": clasificacion.get("resumen"),
+            })
+            logger.info(f"Sincronizado {nombre} ({telefono}): {clasificacion.get('etapa')}")
+
+        except Exception as e:
+            logger.error(f"Error sincronizando {telefono}: {e}")
+            errores.append(telefono)
+
+    logger.info(f"Sincronización completa: {len(resultados)} chats, {len(errores)} errores")
+    return {
+        "status": "ok",
+        "sincronizados": len(resultados),
+        "errores": len(errores),
+        "chats": resultados
+    }
+
+
+@app.post("/analizar-estilo")
+async def analizar_estilo(x_password: str = None):
+    """
+    Analiza el estilo de escritura de Fedra para que Sofia aprenda.
+    Devuelve ejemplos de frases para usar en el system prompt.
+    """
+    verificar_password(x_password)
+    ejemplos = await analizar_estilo_fedra(max_chats=30)
+    if not ejemplos:
+        return {"status": "ok", "mensaje": "No se encontraron mensajes de Fedra", "ejemplos": ""}
+    return {"status": "ok", "ejemplos": ejemplos}
 
 
 @app.post("/resetear/{telefono}")

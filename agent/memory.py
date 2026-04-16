@@ -53,6 +53,10 @@ class Conversacion(Base):
     nombre: Mapped[str] = mapped_column(String(200), default="")
     derivada: Mapped[bool] = mapped_column(Boolean, default=False)
     etapa: Mapped[str] = mapped_column(String(50), default="nuevo")
+    cobro_pendiente: Mapped[bool] = mapped_column(Boolean, default=False)
+    monto_cobro: Mapped[str] = mapped_column(String(200), default="")
+    resumen: Mapped[str] = mapped_column(String(500), default="")
+    contacto_existente: Mapped[bool] = mapped_column(Boolean, default=False)
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -175,11 +179,58 @@ async def listar_conversaciones() -> list[dict]:
                 "nombre": conv.nombre or conv.telefono,
                 "etapa": conv.etapa,
                 "derivada": conv.derivada,
+                "cobro_pendiente": conv.cobro_pendiente,
+                "monto_cobro": conv.monto_cobro or "",
+                "resumen": conv.resumen or "",
+                "contacto_existente": conv.contacto_existente,
                 "actualizado": conv.actualizado.isoformat(),
                 "ultimo_mensaje": msg.content[:100] if msg else "",
                 "ultimo_rol": msg.role if msg else "",
             })
         return output
+
+
+async def actualizar_nombre(telefono: str, nombre: str):
+    """Actualiza el nombre de un contacto."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.nombre = nombre
+            conv.actualizado = datetime.utcnow()
+            await session.commit()
+        else:
+            session.add(Conversacion(telefono=telefono, nombre=nombre))
+            await session.commit()
+
+
+async def upsert_conversacion(telefono: str, nombre: str = "", etapa: str = "nuevo",
+                               cobro_pendiente: bool = False, monto_cobro: str = "",
+                               resumen: str = "", contacto_existente: bool = False):
+    """Crea o actualiza una conversación completa desde la sincronización."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            if nombre:
+                conv.nombre = nombre
+            conv.etapa = etapa
+            conv.cobro_pendiente = cobro_pendiente
+            conv.monto_cobro = monto_cobro or ""
+            conv.resumen = resumen
+            conv.contacto_existente = contacto_existente
+            conv.actualizado = datetime.utcnow()
+        else:
+            session.add(Conversacion(
+                telefono=telefono,
+                nombre=nombre,
+                etapa=etapa,
+                cobro_pendiente=cobro_pendiente,
+                monto_cobro=monto_cobro or "",
+                resumen=resumen,
+                contacto_existente=contacto_existente,
+            ))
+        await session.commit()
 
 
 async def reactivar_conversacion(telefono: str):
