@@ -252,7 +252,7 @@ async def sincronizar_chats(x_password: str = None):
             continue
 
         try:
-            mensajes = await fetch_mensajes(chat_id, count=40)
+            mensajes = await fetch_mensajes(chat_id, count=100)
             tiene_msgs_de_fedra = any(m.get("from_me") for m in mensajes)
             clasificacion = await clasificar_conversacion_con_ia(chat_id, nombre, mensajes)
 
@@ -266,14 +266,43 @@ async def sincronizar_chats(x_password: str = None):
                 contacto_existente=tiene_msgs_de_fedra,
             )
 
+            # Importar mensajes al historial local
+            await limpiar_historial(telefono)
+            for msg in sorted(mensajes, key=lambda m: m.get("timestamp", 0)):
+                tipo = msg.get("type", "")
+                from_me = msg.get("from_me", False)
+                rol = "assistant" if from_me else "user"
+
+                if tipo == "text":
+                    texto = msg.get("text", {}).get("body", "")
+                elif tipo == "image":
+                    caption = msg.get("image", {}).get("caption", "")
+                    texto = f"[Imagen]{': ' + caption if caption else ''}"
+                elif tipo == "video":
+                    caption = msg.get("video", {}).get("caption", "")
+                    texto = f"[Video]{': ' + caption if caption else ''}"
+                elif tipo == "audio":
+                    texto = "[Audio 🎙️]"
+                elif tipo == "document":
+                    nombre_doc = msg.get("document", {}).get("file_name", "archivo")
+                    texto = f"[Documento: {nombre_doc}]"
+                elif tipo == "sticker":
+                    texto = "[Sticker]"
+                else:
+                    texto = f"[{tipo}]"
+
+                if texto:
+                    await guardar_mensaje(telefono, rol, texto)
+
             resultados.append({
                 "telefono": telefono,
                 "nombre": nombre,
                 "etapa": clasificacion.get("etapa"),
                 "cobro_pendiente": clasificacion.get("cobro_pendiente"),
                 "resumen": clasificacion.get("resumen"),
+                "mensajes_importados": len(mensajes),
             })
-            logger.info(f"Sincronizado {nombre} ({telefono}): {clasificacion.get('etapa')}")
+            logger.info(f"Sincronizado {nombre} ({telefono}): {clasificacion.get('etapa')} — {len(mensajes)} msgs")
 
         except Exception as e:
             logger.error(f"Error sincronizando {telefono}: {e}")
