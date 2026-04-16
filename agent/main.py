@@ -21,6 +21,7 @@ from agent.memory import (
     limpiar_historial, async_session, Conversacion,
     actualizar_nombre, upsert_conversacion,
     obtener_config, guardar_config,
+    obtener_notas, guardar_notas,
 )
 from agent.whapi_helper import (
     fetch_chats, fetch_mensajes, fetch_nombre_contacto,
@@ -495,6 +496,24 @@ async def api_set_configuracion(x_password: str = None, request: Request = None)
     body = await request.json()
     for clave, valor in body.items():
         await guardar_config(clave, str(valor))
+    return {"status": "ok"}
+
+
+@app.get("/api/conversaciones/{telefono}/notas")
+async def api_get_notas(telefono: str, x_password: str = None):
+    """CRM — obtiene las notas privadas de una conversación."""
+    verificar_password(x_password)
+    notas = await obtener_notas(telefono)
+    return {"telefono": telefono, "notas": notas}
+
+
+@app.put("/api/conversaciones/{telefono}/notas")
+async def api_guardar_notas(telefono: str, x_password: str = None, request: Request = None):
+    """CRM — guarda las notas privadas de una conversación."""
+    verificar_password(x_password)
+    body = await request.json()
+    notas = body.get("notas", "")
+    await guardar_notas(telefono, notas)
     return {"status": "ok"}
 
 

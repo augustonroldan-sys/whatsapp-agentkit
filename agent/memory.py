@@ -58,6 +58,7 @@ class Conversacion(Base):
     monto_cobro: Mapped[str] = mapped_column(String(200), default="")
     resumen: Mapped[str] = mapped_column(String(500), default="")
     contacto_existente: Mapped[bool] = mapped_column(Boolean, default=False)
+    notas: Mapped[str] = mapped_column(Text, default="")
     actualizado: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -270,6 +271,27 @@ async def upsert_conversacion(telefono: str, nombre: str = "", etapa: str = "nue
                 resumen=resumen,
                 contacto_existente=contacto_existente,
             ))
+        await session.commit()
+
+
+async def obtener_notas(telefono: str) -> str:
+    """Devuelve las notas privadas de una conversación."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        return conv.notas if conv and conv.notas else ""
+
+
+async def guardar_notas(telefono: str, notas: str):
+    """Guarda o actualiza las notas privadas de una conversación."""
+    async with async_session() as session:
+        result = await session.execute(select(Conversacion).where(Conversacion.telefono == telefono))
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.notas = notas
+            conv.actualizado = datetime.utcnow()
+        else:
+            session.add(Conversacion(telefono=telefono, notas=notas))
         await session.commit()
 
 
