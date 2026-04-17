@@ -35,6 +35,7 @@ from agent.whapi_helper import (
     enviar_texto_whapi, enviar_imagen_whapi, enviar_documento_whapi,
     enviar_sticker_whapi, reaccionar_whapi, editar_texto_whapi,
     fetch_avatar_contacto,
+    configurar_webhook_evolution, obtener_qr_evolution,
 )
 from agent.providers import obtener_proveedor
 from agent.tools import detectar_intencion_compra_ia, generar_mensaje_derivacion, enviar_alerta_telegram
@@ -127,10 +128,108 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+def _normalizar_msg_evolution(body: dict) -> list[dict]:
+    """
+    Convierte el payload de Evolution API al formato interno usado por el webhook.
+    Evolution manda: {event, instance, data: {key, pushName, message, messageType, messageTimestamp}}
+    Retorna lista de mensajes normalizados compatibles con el código existente.
+    """
+    event = body.get("event", "")
+    if event != "messages.upsert":
+        return []
+
+    data = body.get("data", {})
+    # data puede ser un objeto o una lista
+    msgs = data if isinstance(data, list) else [data]
+
+    result = []
+    for msg in msgs:
+        key = msg.get("key", {})
+        if key.get("fromMe", False):
+            continue  # Ignorar mensajes propios
+
+        remote_jid = key.get("remoteJid", "")
+        # Ignorar grupos
+        if "@g.us" in remote_jid:
+            continue
+
+        telefono = remote_jid.replace("@s.whatsapp.net", "").replace("@c.us", "")
+        if not telefono:
+            continue
+
+        message_type = msg.get("messageType", "")
+        message = msg.get("message", {})
+        msg_id = key.get("id", "")
+
+        normalized = {
+            "id": msg_id,
+            "from_me": False,
+            "from": telefono,
+            "from_name": msg.get("pushName", ""),
+            "timestamp": msg.get("messageTimestamp", 0),
+            "_raw_evo": msg,  # conservar para descargar media
+        }
+
+        if message_type in ("conversation", "extendedTextMessage"):
+            normalized["type"] = "text"
+            text = (
+                message.get("conversation")
+                or message.get("extendedTextMessage", {}).get("text", "")
+                or ""
+            )
+            normalized["text"] = {"body": text}
+
+        elif message_type == "audioMessage":
+            audio = message.get("audioMessage", {})
+            normalized["type"] = "audio"
+            normalized["audio"] = {
+                "id": msg_id,
+                "mime_type": audio.get("mimetype", "audio/ogg"),
+            }
+
+        elif message_type == "imageMessage":
+            img = message.get("imageMessage", {})
+            normalized["type"] = "image"
+            normalized["image"] = {
+                "id": msg_id,
+                "caption": img.get("caption", ""),
+                "mime_type": img.get("mimetype", "image/jpeg"),
+            }
+
+        elif message_type == "videoMessage":
+            vid = message.get("videoMessage", {})
+            normalized["type"] = "video"
+            normalized["video"] = {
+                "id": msg_id,
+                "caption": vid.get("caption", ""),
+                "mime_type": vid.get("mimetype", "video/mp4"),
+            }
+
+        elif message_type == "documentMessage":
+            doc = message.get("documentMessage", {})
+            normalized["type"] = "document"
+            normalized["document"] = {
+                "id": msg_id,
+                "file_name": doc.get("fileName", "documento"),
+                "mime_type": doc.get("mimetype", "application/octet-stream"),
+                "caption": doc.get("caption", ""),
+            }
+
+        elif message_type == "stickerMessage":
+            normalized["type"] = "sticker"
+
+        else:
+            normalized["type"] = message_type or "unknown"
+
+        result.append(normalized)
+
+    return result
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
-    Recibe mensajes de WhatsApp.
+    Recibe mensajes de WhatsApp via Evolution API.
     - Solo responde a contactos NUEVOS (sin historial con Fedra)
     - Transcribe audios automáticamente
     - Guarda el nombre real del contacto
@@ -138,13 +237,10 @@ async def webhook_handler(request: Request):
     """
     try:
         body = await request.json()
-        mensajes_raw = body.get("messages", [])
+        mensajes_raw = _normalizar_msg_evolution(body)
 
         for msg_raw in mensajes_raw:
-            if msg_raw.get("from_me", False):
-                continue
-
-            telefono = msg_raw.get("from", "") or msg_raw.get("chat_id", "").replace("@s.whatsapp.net", "")
+            telefono = msg_raw.get("from", "")
             if not telefono:
                 continue
 
@@ -167,44 +263,38 @@ async def webhook_handler(request: Request):
             texto = None
             imagen_bytes: bytes | None = None
             imagen_mime: str = "image/jpeg"
+
             if tipo == "text":
                 texto = msg_raw.get("text", {}).get("body", "")
+
             elif tipo == "audio":
                 audio_info = msg_raw.get("audio", {})
                 media_id = audio_info.get("id", "")
                 mime_type = audio_info.get("mime_type", "audio/ogg")
-                # Guardar en CRM con media_id para reproducción
                 if media_id:
                     await guardar_mensaje(telefono, "user", f"[Audio]({media_id})", message_id=msg_id_entrante)
-                    # Intentar transcribir para que Sofia entienda
                     audio_bytes = await descargar_audio(media_id)
                     if audio_bytes:
                         transcripcion = await transcribir_audio(audio_bytes, mime_type)
                         if transcripcion:
                             logger.info(f"Audio transcripto de {telefono}: {transcripcion}")
                             texto = transcripcion
-                        else:
-                            texto = None  # Sin transcripción — Sofia no responde al audio
-                    else:
-                        texto = None
-                else:
-                    texto = None
                 if not texto:
                     continue  # Sin transcripción — no responder
+
             elif tipo == "image":
                 img_info = msg_raw.get("image", {})
                 caption = img_info.get("caption", "")
                 media_id = img_info.get("id", "")
-                # Guardar solo el media_id — el CRM usa el proxy para cargarlo
                 texto_crm = f"[Imagen]({media_id})" if media_id else "[Imagen]"
                 if caption:
                     texto_crm += f" {caption}"
                 await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
-                imagen_bytes = None
                 imagen_mime = img_info.get("mime_type", "image/jpeg")
                 if media_id:
                     imagen_bytes = await descargar_media(media_id)
                 texto = caption if caption else "El cliente envió una imagen"
+
             elif tipo == "video":
                 vid_info = msg_raw.get("video", {})
                 caption = vid_info.get("caption", "")
@@ -214,19 +304,15 @@ async def webhook_handler(request: Request):
                     texto_crm += f" {caption}"
                 await guardar_mensaje(telefono, "user", texto_crm, message_id=msg_id_entrante)
                 texto = caption if caption else "El cliente envió un video"
+
             elif tipo == "document":
                 doc_info = msg_raw.get("document", {})
                 media_id = doc_info.get("id", "")
                 nombre_doc = doc_info.get("file_name", "documento")
                 mime_type = doc_info.get("mime_type", "")
                 caption = doc_info.get("caption", "")
-
-                # Guardar en CRM con link descargable
-                url_media = f"https://gate.whapi.cloud/media/{media_id}" if media_id else ""
-                texto_crm = f"[Documento: {nombre_doc}]({url_media})" if url_media else f"[Documento: {nombre_doc}]"
+                texto_crm = f"[Documento: {nombre_doc}]({media_id})" if media_id else f"[Documento: {nombre_doc}]"
                 await guardar_mensaje(telefono, "user", texto_crm)
-
-                # Intentar extraer texto para que Sofia lo entienda
                 if media_id and nombre_doc.lower().endswith((".pdf", ".docx", ".txt")):
                     archivo_bytes = await descargar_media(media_id)
                     if archivo_bytes:
@@ -256,7 +342,6 @@ async def webhook_handler(request: Request):
             es_nuevo = await es_contacto_nuevo(telefono)
             if not es_nuevo:
                 logger.info(f"Contacto {telefono} ya tiene historial con Fedra — Sofia no responde")
-                # Igual guardamos el mensaje para el CRM
                 await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
                 continue
 
@@ -277,7 +362,6 @@ async def webhook_handler(request: Request):
             respuesta = await generar_respuesta(texto, historial, imagen_bytes=imagen_bytes, imagen_mime=imagen_mime)
             await guardar_mensaje(telefono, "user", texto, message_id=msg_id_entrante)
 
-            # Delay para parecer más humano
             import asyncio, random
             delay_modo = await obtener_config("delay_respuesta", "normal")
             rangos = {
@@ -631,21 +715,17 @@ async def api_avatar_proxy(telefono: str, x_password: str = None):
 
 @app.get("/api/media/{media_id}")
 async def api_media_proxy(media_id: str, x_password: str = None):
-    """Proxy para servir audio/media de Whapi al CRM sin exponer el token."""
+    """Proxy para servir audio/media de Evolution API al CRM."""
     verificar_password(x_password)
-    import httpx
-    WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "")
-    url = f"https://gate.whapi.cloud/media/{media_id}"
-    async with httpx.AsyncClient(timeout=30) as http:
-        resp = await http.get(url, headers={"Authorization": f"Bearer {WHAPI_TOKEN}"})
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail="Media no encontrado")
-        content_type = resp.headers.get("content-type", "application/octet-stream")
-        return StreamingResponse(
-            iter([resp.content]),
-            media_type=content_type,
-            headers={"Cache-Control": "private, max-age=3600"},
-        )
+    from agent.whapi_helper import _get_base64_media
+    data, mime_type = await _get_base64_media(media_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Media no encontrado")
+    return StreamingResponse(
+        iter([data]),
+        media_type=mime_type or "application/octet-stream",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.post("/api/conversaciones/{telefono}/resumen")
@@ -793,3 +873,27 @@ async def pausar_sofia(telefono: str, x_password: str = None):
     await marcar_derivado(telefono)
     logger.info(f"Sofia pausada para {telefono}")
     return {"status": "ok", "mensaje": f"Sofia pausada para {telefono}"}
+
+
+@app.get("/evolution/qr")
+async def evolution_qr(x_password: str = None):
+    """Devuelve el QR para conectar WhatsApp a Evolution API."""
+    verificar_password(x_password)
+    return await obtener_qr_evolution()
+
+
+@app.post("/evolution/setup-webhook")
+async def evolution_setup_webhook(x_password: str = None, request: Request = None):
+    """Configura el webhook de Evolution API apuntando a esta instancia de Sofia."""
+    verificar_password(x_password)
+    body = await request.json() if request else {}
+    # Usar la URL provista o autodetectar desde la request
+    webhook_url = body.get("webhook_url", "")
+    if not webhook_url:
+        # Intentar construir desde env
+        server_url = os.getenv("SERVER_URL", "")
+        webhook_url = f"{server_url}/webhook" if server_url else ""
+    if not webhook_url:
+        raise HTTPException(status_code=400, detail="Proveer webhook_url o configurar SERVER_URL")
+    ok = await configurar_webhook_evolution(webhook_url)
+    return {"status": "ok" if ok else "error", "webhook_url": webhook_url}
