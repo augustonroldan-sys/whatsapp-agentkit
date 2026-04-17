@@ -897,3 +897,23 @@ async def evolution_setup_webhook(x_password: str = None, request: Request = Non
         raise HTTPException(status_code=400, detail="Proveer webhook_url o configurar SERVER_URL")
     ok = await configurar_webhook_evolution(webhook_url)
     return {"status": "ok" if ok else "error", "webhook_url": webhook_url}
+
+
+@app.post("/evolution/logout")
+async def evolution_logout(x_password: str = None):
+    """Cierra la sesión de WhatsApp en Evolution API."""
+    verificar_password(x_password)
+    from agent.whapi_helper import EVOLUTION_URL, EVOLUTION_INSTANCE, _h
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.delete(
+                f"{EVOLUTION_URL}/instance/logout/{EVOLUTION_INSTANCE}",
+                headers=_h(),
+            )
+            ok = r.status_code in (200, 201)
+            logger.info(f"Logout Evolution: {r.status_code}")
+            return {"status": "ok" if ok else "error"}
+    except Exception as e:
+        logger.error(f"Error en logout Evolution: {e}")
+        return {"status": "error", "detail": str(e)}
