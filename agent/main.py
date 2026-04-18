@@ -234,9 +234,35 @@ async def webhook_handler(request: Request):
     - Transcribe audios automáticamente
     - Guarda el nombre real del contacto
     - Si detecta intención de compra → deriva a Fedra
+    - Captura eventos de QR y estado de conexión
     """
     try:
         body = await request.json()
+        event = body.get("event", "")
+
+        # Evento: QR actualizado — guardarlo en DB para que el CRM lo muestre
+        if event == "QRCODE_UPDATED":
+            qr_data = body.get("data", {})
+            qr_base64 = qr_data.get("qrcode", {}).get("base64") or qr_data.get("base64") or ""
+            if qr_base64:
+                await guardar_config("whatsapp_qr", qr_base64)
+                await guardar_config("whatsapp_status", "qr")
+                logger.info("QR de WhatsApp actualizado y guardado")
+            return {"status": "ok"}
+
+        # Evento: cambio de estado de conexión
+        if event == "CONNECTION_UPDATE":
+            conn_data = body.get("data", {})
+            state = conn_data.get("state", "")
+            if state == "open":
+                await guardar_config("whatsapp_status", "connected")
+                await guardar_config("whatsapp_qr", "")  # Limpiar QR viejo
+                logger.info("WhatsApp conectado exitosamente")
+            elif state in ("close", "connecting"):
+                await guardar_config("whatsapp_status", state)
+                logger.info(f"Estado WhatsApp: {state}")
+            return {"status": "ok"}
+
         mensajes_raw = _normalizar_msg_evolution(body)
 
         for msg_raw in mensajes_raw:
@@ -877,9 +903,37 @@ async def pausar_sofia(telefono: str, x_password: str = None):
 
 @app.get("/evolution/qr")
 async def evolution_qr(x_password: str = None):
-    """Devuelve el QR para conectar WhatsApp a Evolution API."""
+    """
+    Devuelve el estado de conexión de WhatsApp y el QR si está disponible.
+    Primero consulta el estado real en Evolution API.
+    Si hay QR guardado en DB (recibido vía webhook), lo incluye en la respuesta.
+    """
     verificar_password(x_password)
-    return await obtener_qr_evolution()
+
+    # Consultar estado real en Evolution API
+    resultado = await obtener_qr_evolution()
+
+    # Si Evolution devolvió un QR, guardarlo y retornarlo
+    if resultado.get("base64"):
+        await guardar_config("whatsapp_qr", resultado["base64"])
+        await guardar_config("whatsapp_status", "qr")
+        return resultado
+
+    # Si ya está conectado, limpiar QR viejo
+    if resultado.get("connected"):
+        await guardar_config("whatsapp_status", "connected")
+        await guardar_config("whatsapp_qr", "")
+        return resultado
+
+    # Si Evolution no devolvió QR, buscar el último guardado en DB
+    qr_guardado = await obtener_config("whatsapp_qr", "")
+
+    if qr_guardado:
+        return {"connected": False, "state": resultado.get("state", "connecting"), "base64": qr_guardado}
+
+    # Sin QR disponible — pedir a Evolution que lo genere
+    logger.info("Sin QR disponible — Evolution API generará uno vía webhook en breve")
+    return {**resultado, "message": "El QR llegará en segundos. Actualizá la página."}
 
 
 @app.post("/evolution/setup-webhook")
