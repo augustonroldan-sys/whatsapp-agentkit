@@ -126,7 +126,23 @@ def _evo_msg_to_whapi(msg: dict) -> dict:
 
 
 async def fetch_chats(count: int = 100) -> list[dict]:
-    """Obtiene todos los chats individuales de WhatsApp via Evolution API."""
+    """Obtiene todos los chats individuales de WhatsApp. Usa Whapi si está configurado."""
+    # ── Whapi ──
+    if usar_whapi():
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{WHAPI_BASE_URL}/chats",
+                    params={"count": count},
+                    headers=_h_whapi(),
+                )
+                data = r.json()
+                return [c for c in data.get("chats", []) if c.get("type") == "contact"]
+        except Exception as e:
+            logger.error(f"Error fetch_chats Whapi: {e}")
+            return []
+
+    # ── Evolution API ──
     if not EVOLUTION_URL:
         return []
     try:
@@ -138,7 +154,6 @@ async def fetch_chats(count: int = 100) -> list[dict]:
             )
             data = r.json()
             chats_raw = data if isinstance(data, list) else data.get("chats", [])
-            # Solo chats individuales (no grupos)
             return [
                 c for c in chats_raw
                 if c.get("id", "").endswith("@s.whatsapp.net")
@@ -149,7 +164,23 @@ async def fetch_chats(count: int = 100) -> list[dict]:
 
 
 async def fetch_mensajes(chat_id: str, count: int = 50) -> list[dict]:
-    """Obtiene los últimos N mensajes de un chat en formato compatible."""
+    """Obtiene los últimos N mensajes de un chat. Usa Whapi si está configurado."""
+    # ── Whapi ──
+    if usar_whapi():
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{WHAPI_BASE_URL}/messages/list/{chat_id}",
+                    params={"count": count},
+                    headers=_h_whapi(),
+                )
+                data = r.json()
+                return data.get("messages", [])
+        except Exception as e:
+            logger.error(f"Error fetch_mensajes Whapi {chat_id}: {e}")
+            return []
+
+    # ── Evolution API ──
     if not EVOLUTION_URL:
         return []
     jid = _jid(chat_id)
@@ -169,7 +200,24 @@ async def fetch_mensajes(chat_id: str, count: int = 50) -> list[dict]:
 
 
 async def fetch_nombre_contacto(telefono: str) -> str:
-    """Obtiene el nombre del contacto desde Evolution API."""
+    """Obtiene el nombre del contacto. Usa Whapi si está configurado."""
+    # ── Whapi ──
+    if usar_whapi():
+        chat_id = f"{_phone(telefono)}@s.whatsapp.net"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{WHAPI_BASE_URL}/chats/{chat_id}",
+                    headers=_h_whapi(),
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    return data.get("name", "") or data.get("last_message", {}).get("from_name", "")
+        except Exception as e:
+            logger.error(f"Error fetch_nombre_contacto Whapi {telefono}: {e}")
+        return ""
+
+    # ── Evolution API ──
     if not EVOLUTION_URL:
         return ""
     try:
@@ -188,7 +236,24 @@ async def fetch_nombre_contacto(telefono: str) -> str:
 
 
 async def fetch_avatar_contacto(telefono: str) -> str:
-    """Obtiene la URL de la foto de perfil del contacto desde Evolution API."""
+    """Obtiene la URL de la foto de perfil del contacto. Usa Whapi si está configurado."""
+    # ── Whapi ──
+    if usar_whapi():
+        contact_id = f"{_phone(telefono)}@s.whatsapp.net"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{WHAPI_BASE_URL}/contacts/{contact_id}",
+                    headers=_h_whapi(),
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    return data.get("avatar", "") or ""
+        except Exception as e:
+            logger.error(f"Error fetch_avatar Whapi {telefono}: {e}")
+        return ""
+
+    # ── Evolution API ──
     if not EVOLUTION_URL:
         return ""
     try:

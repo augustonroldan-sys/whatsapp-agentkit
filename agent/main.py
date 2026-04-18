@@ -1222,6 +1222,68 @@ async def evolution_debug(x_password: str = None):
     return resultado
 
 
+@app.post("/whapi/setup-webhook")
+async def whapi_setup_webhook(x_password: str = None, request: Request = None):
+    """
+    Configura el webhook en Whapi.cloud para recibir mensajes.
+    Llama a PUT /settings en la API de Whapi con la URL de Sofia.
+    Body opcional: {"webhook_url": "https://..."}
+    """
+    verificar_password(x_password)
+    from agent.whapi_helper import WHAPI_TOKEN, WHAPI_BASE_URL
+    import httpx
+
+    if not WHAPI_TOKEN:
+        return {"status": "error", "message": "WHAPI_TOKEN no configurado en Railway env vars"}
+
+    body = await request.json() if request else {}
+    server_url = body.get("webhook_url") or os.getenv("SERVER_URL", "")
+    webhook_url = f"{server_url}/webhook" if server_url and not server_url.endswith("/webhook") else server_url
+
+    if not webhook_url:
+        return {"status": "error", "message": "Proveer webhook_url o configurar SERVER_URL"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.put(
+            f"{WHAPI_BASE_URL}/settings",
+            headers={"Authorization": f"Bearer {WHAPI_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "webhooks": [{
+                    "url": webhook_url,
+                    "events": [
+                        {"type": "messages", "method": "post"},
+                    ],
+                    "mode": "body",
+                }]
+            },
+        )
+        data = r.json()
+        ok = r.status_code in (200, 201)
+        logger.info(f"Whapi webhook setup: {r.status_code} {data}")
+        return {"status": "ok" if ok else "error", "webhook_url": webhook_url, "response": data}
+
+
+@app.get("/whapi/status")
+async def whapi_status(x_password: str = None):
+    """Muestra el estado de la conexión de Whapi (si está configurado)."""
+    verificar_password(x_password)
+    from agent.whapi_helper import WHAPI_TOKEN, WHAPI_BASE_URL, usar_whapi
+    import httpx
+
+    if not usar_whapi():
+        return {"configurado": False, "mensaje": "WHAPI_TOKEN no configurado — usando Evolution API"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{WHAPI_BASE_URL}/health",
+                headers={"Authorization": f"Bearer {WHAPI_TOKEN}"},
+            )
+            return {"configurado": True, "status": r.status_code, "data": r.json()}
+    except Exception as e:
+        return {"configurado": True, "error": str(e)}
+
+
 @app.post("/evolution/setup-webhook")
 async def evolution_setup_webhook(x_password: str = None, request: Request = None):
     """Configura el webhook de Evolution API apuntando a esta instancia de Sofia."""
