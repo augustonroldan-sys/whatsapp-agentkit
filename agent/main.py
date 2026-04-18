@@ -128,6 +128,86 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+def _normalizar_msg_whapi(body: dict) -> list[dict]:
+    """
+    Convierte el payload de Whapi.cloud al formato interno.
+    Whapi envía: {messages: [{id, from_me, type, from, chat_id, text.body, ...}]}
+    """
+    result = []
+    for msg in body.get("messages", []):
+        if msg.get("from_me", False):
+            continue
+
+        chat_id = msg.get("chat_id", "")
+        # Ignorar grupos
+        if "@g.us" in chat_id:
+            continue
+
+        telefono = chat_id.replace("@s.whatsapp.net", "").replace("@c.us", "")
+        if not telefono:
+            continue
+
+        tipo_whapi = msg.get("type", "text")
+        msg_id = msg.get("id", "")
+
+        normalized: dict = {
+            "id": msg_id,
+            "from_me": False,
+            "from": telefono,
+            "from_name": msg.get("from_name", ""),
+            "timestamp": msg.get("timestamp", 0),
+        }
+
+        if tipo_whapi == "text":
+            normalized["type"] = "text"
+            normalized["text"] = {"body": msg.get("text", {}).get("body", "")}
+
+        elif tipo_whapi in ("audio", "ptt"):
+            normalized["type"] = "audio"
+            normalized["audio"] = {
+                "id": msg_id,
+                "mime_type": msg.get("audio", {}).get("mime_type", "audio/ogg"),
+            }
+
+        elif tipo_whapi == "image":
+            img = msg.get("image", {})
+            normalized["type"] = "image"
+            normalized["image"] = {
+                "id": msg_id,
+                "caption": img.get("caption", ""),
+                "mime_type": img.get("mime_type", "image/jpeg"),
+            }
+
+        elif tipo_whapi == "video":
+            vid = msg.get("video", {})
+            normalized["type"] = "video"
+            normalized["video"] = {
+                "id": msg_id,
+                "caption": vid.get("caption", ""),
+                "mime_type": vid.get("mime_type", "video/mp4"),
+            }
+
+        elif tipo_whapi == "document":
+            doc = msg.get("document", {})
+            normalized["type"] = "document"
+            normalized["document"] = {
+                "id": msg_id,
+                "file_name": doc.get("file_name", "documento"),
+                "mime_type": doc.get("mime_type", "application/octet-stream"),
+                "caption": doc.get("caption", ""),
+            }
+
+        elif tipo_whapi == "sticker":
+            normalized["type"] = "sticker"
+
+        else:
+            normalized["type"] = tipo_whapi
+
+        result.append(normalized)
+
+    return result
+
+
 def _normalizar_msg_evolution(body: dict) -> list[dict]:
     """
     Convierte el payload de Evolution API al formato interno usado por el webhook.
@@ -229,12 +309,13 @@ def _normalizar_msg_evolution(body: dict) -> list[dict]:
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
-    Recibe mensajes de WhatsApp via Evolution API.
+    Recibe mensajes de WhatsApp via Evolution API (Baileys) o Whapi.cloud.
+    Detecta automáticamente el formato según el proveedor.
     - Solo responde a contactos NUEVOS (sin historial con Fedra)
     - Transcribe audios automáticamente
     - Guarda el nombre real del contacto
     - Si detecta intención de compra → deriva a Fedra
-    - Captura eventos de QR y estado de conexión
+    - Captura eventos de QR y estado de conexión (solo Evolution)
     """
     try:
         body = await request.json()
@@ -267,7 +348,14 @@ async def webhook_handler(request: Request):
                 logger.info(f"Estado WhatsApp: {state}")
             return {"status": "ok"}
 
-        mensajes_raw = _normalizar_msg_evolution(body)
+        # Detectar proveedor por el formato del payload
+        # Whapi: tiene "messages" y NO tiene "event"
+        # Evolution: tiene "event"
+        if not event and "messages" in body:
+            mensajes_raw = _normalizar_msg_whapi(body)
+            logger.info(f"[WHAPI] {len(mensajes_raw)} mensajes recibidos")
+        else:
+            mensajes_raw = _normalizar_msg_evolution(body)
 
         for msg_raw in mensajes_raw:
             telefono = msg_raw.get("from", "")

@@ -20,6 +20,10 @@ EVOLUTION_URL = os.getenv("EVOLUTION_URL", "").rstrip("/")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "hefe")
 
+# Whapi.cloud — proveedor alternativo HTTP-based (sin WebSocket, funciona en Railway)
+WHAPI_TOKEN = os.getenv("WHAPI_TOKEN", "")
+WHAPI_BASE_URL = os.getenv("WHAPI_BASE_URL", "https://gate.whapi.cloud")
+
 anthropic = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 ETAPAS_VALIDAS = ["nuevo", "respondio", "interesado", "presupuesto", "seguimiento", "cerrado"]
@@ -27,6 +31,15 @@ ETAPAS_VALIDAS = ["nuevo", "respondio", "interesado", "presupuesto", "seguimient
 
 def _h() -> dict:
     return {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
+
+
+def _h_whapi() -> dict:
+    return {"Authorization": f"Bearer {WHAPI_TOKEN}", "Content-Type": "application/json"}
+
+
+def usar_whapi() -> bool:
+    """Retorna True si Whapi.cloud está configurado (preferir sobre Evolution)."""
+    return bool(WHAPI_TOKEN)
 
 
 def _phone(telefono: str) -> str:
@@ -412,17 +425,44 @@ async def extraer_texto_documento(archivo_bytes: bytes, nombre: str) -> str | No
 
 
 async def enviar_texto_whapi(telefono: str, texto: str, quoted_id: str = "") -> str:
-    """Envía texto via Evolution API. Retorna el message_id."""
+    """
+    Envía texto por WhatsApp. Usa Whapi.cloud si WHAPI_TOKEN está configurado,
+    sino usa Evolution API. Retorna el message_id.
+    """
+    phone = _phone(telefono)
+
+    # ── Whapi.cloud (HTTP-based, funciona en Railway sin WebSocket) ──
+    if usar_whapi():
+        payload: dict = {"to": f"{phone}@s.whatsapp.net", "body": texto}
+        if quoted_id:
+            payload["quoted_id"] = quoted_id
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"{WHAPI_BASE_URL}/messages/text",
+                    json=payload,
+                    headers=_h_whapi(),
+                )
+                data = r.json()
+                if r.status_code not in (200, 201):
+                    logger.error(f"Error enviando texto Whapi: {r.status_code} {data}")
+                    return ""
+                return data.get("message", {}).get("id", "")
+        except Exception as e:
+            logger.error(f"Error enviando texto Whapi: {e}")
+            return ""
+
+    # ── Evolution API (fallback) ──
     if not EVOLUTION_URL:
         return ""
-    payload: dict = {"number": _phone(telefono), "text": texto}
+    payload_evo: dict = {"number": phone, "text": texto}
     if quoted_id:
-        payload["quoted"] = {"key": {"id": quoted_id}}
+        payload_evo["quoted"] = {"key": {"id": quoted_id}}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{EVOLUTION_URL}/message/sendText/{EVOLUTION_INSTANCE}",
-                json=payload,
+                json=payload_evo,
                 headers=_h(),
             )
             data = r.json()
