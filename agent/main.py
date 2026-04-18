@@ -1030,6 +1030,68 @@ async def evolution_pairing_code(x_password: str = None, request: Request = None
             return {"error": str(e)}
 
 
+@app.post("/evolution/recrear-instancia")
+async def evolution_recrear_instancia(x_password: str = None):
+    """
+    Borra y recrea la instancia de Evolution API.
+    Útil cuando la instancia está en estado inconsistente.
+    """
+    verificar_password(x_password)
+    from agent.whapi_helper import EVOLUTION_URL, EVOLUTION_INSTANCE, EVOLUTION_API_KEY, _h
+    import httpx
+    import asyncio
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. Intentar borrar la instancia (puede que no exista, ignorar error)
+        try:
+            await client.delete(
+                f"{EVOLUTION_URL}/instance/delete/{EVOLUTION_INSTANCE}",
+                headers=_h(),
+            )
+            logger.info(f"Instancia {EVOLUTION_INSTANCE} borrada")
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        # 2. Crear instancia fresca
+        try:
+            r = await client.post(
+                f"{EVOLUTION_URL}/instance/create",
+                headers=_h(),
+                json={
+                    "instanceName": EVOLUTION_INSTANCE,
+                    "integration": "WHATSAPP-BAILEYS",
+                    "qrcode": True,
+                },
+            )
+            create_data = r.json()
+            logger.info(f"Instancia creada: {create_data}")
+        except Exception as e:
+            return {"status": "error", "step": "create", "error": str(e)}
+
+        if r.status_code not in (200, 201):
+            return {"status": "error", "step": "create", "http_status": r.status_code, "data": create_data}
+
+        await asyncio.sleep(3)
+
+        # 3. Conectar
+        try:
+            r_conn = await client.get(
+                f"{EVOLUTION_URL}/instance/connect/{EVOLUTION_INSTANCE}",
+                headers=_h(),
+            )
+            conn_data = r_conn.json()
+            logger.info(f"Connect response: {conn_data}")
+        except Exception as e:
+            return {"status": "created_but_connect_failed", "create": create_data, "error": str(e)}
+
+        return {
+            "status": "ok",
+            "create": create_data,
+            "connect": conn_data,
+        }
+
+
 @app.get("/evolution/debug")
 async def evolution_debug(x_password: str = None):
     """
