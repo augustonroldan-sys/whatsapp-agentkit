@@ -240,8 +240,12 @@ async def webhook_handler(request: Request):
         body = await request.json()
         event = body.get("event", "")
 
+        # DEBUG temporal — loguear todos los eventos no-mensaje
+        if event and event != "MESSAGES_UPSERT":
+            logger.info(f"[WEBHOOK EVENT] event={event!r} keys={list(body.keys())} data_keys={list(body.get('data', {}).keys()) if isinstance(body.get('data'), dict) else body.get('data', '')!r}")
+
         # Evento: QR actualizado — guardarlo en DB para que el CRM lo muestre
-        if event == "QRCODE_UPDATED":
+        if event in ("QRCODE_UPDATED", "qrcode.updated"):
             qr_data = body.get("data", {})
             qr_base64 = qr_data.get("qrcode", {}).get("base64") or qr_data.get("base64") or ""
             if qr_base64:
@@ -251,7 +255,7 @@ async def webhook_handler(request: Request):
             return {"status": "ok"}
 
         # Evento: cambio de estado de conexión
-        if event == "CONNECTION_UPDATE":
+        if event in ("CONNECTION_UPDATE", "connection.update"):
             conn_data = body.get("data", {})
             state = conn_data.get("state", "")
             if state == "open":
@@ -934,6 +938,35 @@ async def evolution_qr(x_password: str = None):
     # Sin QR disponible — pedir a Evolution que lo genere
     logger.info("Sin QR disponible — Evolution API generará uno vía webhook en breve")
     return {**resultado, "message": "El QR llegará en segundos. Actualizá la página."}
+
+
+@app.post("/evolution/pairing-code")
+async def evolution_pairing_code(x_password: str = None, request: Request = None):
+    """
+    Solicita un código de emparejamiento por número de teléfono.
+    Alternativa al QR — el usuario ingresa el código en WhatsApp > Dispositivos vinculados.
+    Body: {"phone": "5491112345678"}  (con código de país, sin +)
+    """
+    verificar_password(x_password)
+    from agent.whapi_helper import EVOLUTION_URL, EVOLUTION_INSTANCE, _h
+    import httpx
+    body = await request.json()
+    phone = str(body.get("phone", "")).strip().replace("+", "").replace(" ", "")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Falta el campo 'phone'")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{EVOLUTION_URL}/instance/pairingCode/{EVOLUTION_INSTANCE}",
+                headers=_h(),
+                json={"number": phone},
+            )
+            data = r.json()
+            logger.info(f"Pairing code solicitado para {phone}: {data}")
+            return data
+    except Exception as e:
+        logger.error(f"Error solicitando pairing code: {e}")
+        return {"error": str(e)}
 
 
 @app.post("/evolution/setup-webhook")
