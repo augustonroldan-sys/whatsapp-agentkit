@@ -946,27 +946,130 @@ async def evolution_pairing_code(x_password: str = None, request: Request = None
     Solicita un código de emparejamiento por número de teléfono.
     Alternativa al QR — el usuario ingresa el código en WhatsApp > Dispositivos vinculados.
     Body: {"phone": "5491112345678"}  (con código de país, sin +)
+
+    Evolution API v2: primero hace logout para limpiar sesión vieja, luego solicita el código.
     """
     verificar_password(x_password)
     from agent.whapi_helper import EVOLUTION_URL, EVOLUTION_INSTANCE, _h
     import httpx
+    import asyncio
     body = await request.json()
-    phone = str(body.get("phone", "")).strip().replace("+", "").replace(" ", "")
+    phone = str(body.get("phone", "")).strip().replace("+", "").replace(" ", "").replace("-", "")
     if not phone:
         raise HTTPException(status_code=400, detail="Falta el campo 'phone'")
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            # Paso 1: Logout para limpiar sesión vieja (ignora errores)
+            try:
+                await client.delete(
+                    f"{EVOLUTION_URL}/instance/logout/{EVOLUTION_INSTANCE}",
+                    headers=_h(),
+                )
+                logger.info("Logout previo ejecutado para limpiar sesión")
+                await asyncio.sleep(2)
+            except Exception:
+                pass
+
+            # Paso 2: Intentar GET /instance/connect/{instance}?number={phone}
+            # (Evolution API v2 retorna pairing code cuando se pasa el número)
+            r = await client.get(
+                f"{EVOLUTION_URL}/instance/connect/{EVOLUTION_INSTANCE}",
+                params={"number": phone},
+                headers=_h(),
+            )
+            data = r.json()
+            logger.info(f"[pairing-code GET connect] status={r.status_code} data={data}")
+
+            # Buscar el código en la respuesta
+            code = (
+                data.get("code")
+                or data.get("pairingCode")
+                or data.get("pairing_code")
+            )
+            if code:
+                logger.info(f"Pairing code obtenido via GET connect: {code}")
+                return {"code": code, "raw": data}
+
+            # Paso 3: Intentar POST /instance/pairingCode/{instance} con phoneNumber
+            r2 = await client.post(
+                f"{EVOLUTION_URL}/instance/pairingCode/{EVOLUTION_INSTANCE}",
+                headers=_h(),
+                json={"phoneNumber": phone},
+            )
+            data2 = r2.json()
+            logger.info(f"[pairing-code POST phoneNumber] status={r2.status_code} data={data2}")
+
+            code2 = (
+                data2.get("code")
+                or data2.get("pairingCode")
+                or data2.get("pairing_code")
+            )
+            if code2:
+                return {"code": code2, "raw": data2}
+
+            # Paso 4: Intentar POST con field "number" (v1 style)
+            r3 = await client.post(
                 f"{EVOLUTION_URL}/instance/pairingCode/{EVOLUTION_INSTANCE}",
                 headers=_h(),
                 json={"number": phone},
             )
-            data = r.json()
-            logger.info(f"Pairing code solicitado para {phone}: {data}")
-            return data
-    except Exception as e:
-        logger.error(f"Error solicitando pairing code: {e}")
-        return {"error": str(e)}
+            data3 = r3.json()
+            logger.info(f"[pairing-code POST number] status={r3.status_code} data={data3}")
+
+            # Retornar lo que tengamos, con todos los datos para debug
+            return {
+                "get_connect": data,
+                "post_phoneNumber": data2,
+                "post_number": data3,
+                "debug": "No se encontró un pairing code en ninguno de los endpoints"
+            }
+
+        except Exception as e:
+            logger.error(f"Error solicitando pairing code: {e}")
+            return {"error": str(e)}
+
+
+@app.get("/evolution/debug")
+async def evolution_debug(x_password: str = None):
+    """
+    Diagnóstico completo de Evolution API:
+    - Estado de conexión
+    - Endpoints disponibles (desde Swagger)
+    - Info de la instancia
+    """
+    verificar_password(x_password)
+    from agent.whapi_helper import EVOLUTION_URL, EVOLUTION_INSTANCE, _h
+    import httpx
+    resultado = {"url": EVOLUTION_URL, "instance": EVOLUTION_INSTANCE}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Estado de conexión
+        try:
+            r = await client.get(f"{EVOLUTION_URL}/instance/connectionState/{EVOLUTION_INSTANCE}", headers=_h())
+            resultado["connection_state"] = r.json()
+        except Exception as e:
+            resultado["connection_state_error"] = str(e)
+
+        # Info de la instancia
+        try:
+            r2 = await client.get(f"{EVOLUTION_URL}/instance/fetchInstances", headers=_h())
+            resultado["instances"] = r2.json()
+        except Exception as e:
+            resultado["instances_error"] = str(e)
+
+        # Swagger/OpenAPI
+        try:
+            r3 = await client.get(f"{EVOLUTION_URL}/api-json", headers=_h())
+            if r3.status_code == 200:
+                swagger = r3.json()
+                resultado["available_paths"] = list(swagger.get("paths", {}).keys())
+            else:
+                resultado["swagger_status"] = r3.status_code
+        except Exception as e:
+            resultado["swagger_error"] = str(e)
+
+    return resultado
 
 
 @app.post("/evolution/setup-webhook")
