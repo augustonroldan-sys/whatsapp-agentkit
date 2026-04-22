@@ -71,7 +71,7 @@ class Configuracion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     clave: Mapped[str] = mapped_column(String(100), unique=True, index=True)
-    valor: Mapped[str] = mapped_column(String(500), default="")
+    valor: Mapped[str] = mapped_column(Text, default="")
 
 
 async def inicializar_db():
@@ -85,6 +85,7 @@ async def inicializar_db():
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS seguimiento_at TIMESTAMP",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS archivada BOOLEAN DEFAULT FALSE",
             "ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS avatar VARCHAR(500) DEFAULT ''",
+            "ALTER TABLE configuracion ALTER COLUMN valor TYPE TEXT",
         ]
         for sql in migraciones:
             try:
